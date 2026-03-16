@@ -1,21 +1,24 @@
-import React from 'react'
+import { Suspense } from 'react'
+import { HashRouter, Route, Routes } from 'react-router-dom'
+import { Layout } from '@/components/layout'
+import { routes } from '@/routes'
+import { ThemeProvider } from './components/theme-provider'
 
 function App(): React.JSX.Element {
   return (
-    <div
-      style={{
-        backgroundColor: 'red',
-        minHeight: '100vh',
-        width: '100%',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center'
-      }}
-    >
-      <h1 style={{ color: 'white', fontSize: '2rem', fontWeight: 'bold' }}>
-        Hello World — Inline Style Test
-      </h1>
-    </div>
+    <HashRouter>
+      <ThemeProvider>
+        <Layout>
+          <Suspense fallback={<div className="text-muted-foreground text-sm">Loading...</div>}>
+            <Routes>
+              {routes.map((route) => (
+                <Route key={route.path} path={route.path} element={route.element} />
+              ))}
+            </Routes>
+          </Suspense>
+        </Layout>
+      </ThemeProvider>
+    </HashRouter>
   )
 }
 

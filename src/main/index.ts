@@ -3,6 +3,9 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
+// Disable GPU hardware acceleration (fixes GPU errors on VMs/RDP/Windows Server)
+// app.disableHardwareAcceleration()
+
 function createWindow(): void {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
@@ -10,12 +13,27 @@ function createWindow(): void {
     height: 670,
     show: false,
     autoHideMenuBar: true,
+    frame: false,
+    transparent: true,
+    titleBarStyle: 'hidden',
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false
     }
   })
+
+  // Window control IPC handlers
+  ipcMain.on('window:minimize', () => mainWindow.minimize())
+  ipcMain.on('window:maximize', () => {
+    if (mainWindow.isMaximized()) {
+      mainWindow.restore()
+    } else {
+      mainWindow.maximize()
+    }
+  })
+  ipcMain.on('window:close', () => mainWindow.close())
+  ipcMain.handle('window:isMaximized', () => mainWindow.isMaximized())
 
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
