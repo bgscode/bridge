@@ -2,13 +2,14 @@
 
 import { useState, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
-import { Separator } from '@/components/ui/separator'
 import { useSidebar } from '@/components/ui/sidebar'
-import { Menu, Minus, Square, X, Maximize2 } from 'lucide-react'
+import { useTheme } from '@/components/theme-provider'
+import { Menu, Minus, Square, X, Maximize2, Sun, Moon } from 'lucide-react'
 
 export function SiteHeader() {
   const [isMaximized, setIsMaximized] = useState(false)
   const { toggleSidebar } = useSidebar()
+  const { theme, setTheme } = useTheme()
 
   useEffect(() => {
     window.api.window.isMaximized().then(setIsMaximized)
@@ -20,6 +21,7 @@ export function SiteHeader() {
     window.api.window.isMaximized().then(setIsMaximized)
   }
   const handleClose = () => window.api.window.close()
+  const toggleTheme = () => setTheme(theme === 'dark' ? 'light' : 'dark')
 
   return (
     <header
@@ -36,11 +38,24 @@ export function SiteHeader() {
         </div>
         <h1 className="text-base font-medium flex-1">Bridge</h1>
 
-        {/* Window control buttons — no drag */}
+        {/* Right side — no drag */}
         <div
           className="flex items-center gap-0.5"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
+          {/* Theme toggle */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 rounded-sm hover:bg-muted"
+            onClick={toggleTheme}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            {theme === 'dark' ? <Sun className="size-4" /> : <Moon className="size-4" />}
+            <span className="sr-only">Toggle theme</span>
+          </Button>
+
+          {/* Window controls */}
           <Button
             variant="ghost"
             size="icon"
@@ -60,7 +75,7 @@ export function SiteHeader() {
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 rounded-sm hover:bg-destructive hover:text-destructive-foreground"
+            className="h-8 w-8 rounded-sm hover:bg-destructive  dark:hover:bg-destructive-foreground"
             onClick={handleClose}
           >
             <X className="size-3.5" />
