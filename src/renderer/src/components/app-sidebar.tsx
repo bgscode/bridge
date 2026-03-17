@@ -22,7 +22,7 @@ import {
   FileIcon,
   CommandIcon
 } from 'lucide-react'
-import { sidebarNavItems } from '@/routes'
+import { sidebarNavItems, sidebarSettingsItems } from '@/routes'
 
 const data = {
   user: {
@@ -87,6 +87,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       </SidebarHeader>
       <SidebarContent>
         <NavMain items={sidebarNavItems} />
+        <NavMain items={sidebarSettingsItems} />
         <NavDocuments items={data.documents} />
         <NavSecondary items={data.navSecondary} className="mt-auto" />
       </SidebarContent>
