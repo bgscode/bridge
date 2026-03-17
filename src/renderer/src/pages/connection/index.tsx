@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Database, Pencil, Plus, ServerCrash, Trash2, Wifi, WifiOff } from 'lucide-react'
 
+import { DataGrid, type DataGridColumnDef } from '@/components/data-grid'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -13,14 +14,6 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import { Separator } from '@/components/ui/separator'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow
-} from '@/components/ui/table'
 
 import { ConnectionForm, type ConnectionFormValues } from './components/form'
 
@@ -79,7 +72,31 @@ const MOCK_CONNECTIONS: Connection[] = [
     group: 'Warehouse',
     status: 'unknown',
     createdAt: '2025-03-05'
-  }
+  },
+
+  // --- Generated Rows ---
+  ...Array.from({ length: 27 }).map((_, i) => {
+    const id = (i + 4).toString()
+    const groups = ['Branch', 'Warehouse', 'Head Office'] as const
+    const statuses = ['online', 'offline', 'unknown'] as const
+    const stores = ['Store A', 'Store B', 'Store C', 'WH-02', 'Main Store'] as const
+
+    return {
+      id,
+      name: `Connection ${id}`,
+      staticIp: `192.168.${(i % 5) + 1}.${100 + i}`,
+      vpnIp: `10.8.0.${i + 2}`,
+      database: `db_${id}`,
+      username: i % 2 === 0 ? 'sa' : 'admin',
+      password: '',
+      trustServerCertificate: i % 2 === 0,
+      store: stores[i % stores.length],
+      financialYear: i % 2 === 0 ? '2024-25' : '2025-26',
+      group: groups[i % groups.length],
+      status: statuses[i % statuses.length],
+      createdAt: `2025-0${(i % 9) + 1}-${(i % 28) + 1}`
+    }
+  })
 ]
 
 // ─── Sub-components ────────────────────────────────────────────────────────────
@@ -106,26 +123,6 @@ function StatusBadge({ status }: { status: Connection['status'] }) {
       <ServerCrash className="size-3" />
       Unknown
     </Badge>
-  )
-}
-
-function EmptyState({ onCreateClick }: { onCreateClick: () => void }) {
-  return (
-    <div className="flex flex-col items-center justify-center gap-4 py-20 text-center">
-      <div className="flex size-16 items-center justify-center rounded-2xl bg-muted">
-        <Database className="size-8 text-muted-foreground" />
-      </div>
-      <div className="flex flex-col gap-1">
-        <h3 className="text-base font-semibold">No connections yet</h3>
-        <p className="max-w-xs text-sm text-muted-foreground">
-          Add your first database connection to get started.
-        </p>
-      </div>
-      <Button size="sm" onClick={onCreateClick} className="gap-2">
-        <Plus className="size-4" />
-        New Connection
-      </Button>
-    </div>
   )
 }
 
@@ -179,6 +176,120 @@ export default function ConnectionPage() {
     }
   }
 
+  // ── Column Definitions ─────────────────────────────────────────────────────
+
+  const columns = useMemo<DataGridColumnDef<Connection>[]>(
+    () => [
+      {
+        accessorKey: 'name',
+        header: 'Name',
+        cell: ({ row }) => <span className="font-medium">{row.original.name}</span>,
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'group',
+        header: 'Group',
+        cell: ({ row }) =>
+          row.original.group ? (
+            <Badge variant="outline" className="text-xs font-normal">
+              {row.original.group}
+            </Badge>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'staticIp',
+        header: 'Static IP',
+        cell: ({ row }) => (
+          <span className="font-mono text-sm text-muted-foreground">{row.original.staticIp}</span>
+        ),
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'vpnIp',
+        header: 'VPN IP',
+        cell: ({ row }) => (
+          <span className="font-mono text-sm text-muted-foreground">{row.original.vpnIp}</span>
+        ),
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'database',
+        header: 'Database',
+        cell: ({ row }) => <span className="font-mono text-sm">{row.original.database}</span>,
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'financialYear',
+        header: 'Financial Year',
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'store',
+        header: 'Store',
+        cell: ({ row }) =>
+          row.original.store ? (
+            <span className="text-sm">{row.original.store}</span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'status',
+        header: 'Status',
+        cell: ({ row }) => <StatusBadge status={row.original.status} />,
+        meta: {
+          filterType: 'select',
+          filterOptions: [
+            { label: 'Online', value: 'online' },
+            { label: 'Offline', value: 'offline' },
+            { label: 'Unknown', value: 'unknown' }
+          ],
+          resizable: true
+        }
+      },
+      {
+        accessorKey: 'createdAt',
+        header: 'Created',
+        meta: { filterType: 'date', resizable: true }
+      },
+      {
+        id: 'actions',
+        header: '',
+        enableSorting: false,
+        enableHiding: false,
+        size: 80,
+        cell: ({ row }) => (
+          <div className="flex items-center justify-end gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7"
+              onClick={() => handleEdit(row.original)}
+            >
+              <Pencil className="size-3.5" />
+              <span className="sr-only">Edit</span>
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 text-destructive hover:text-destructive"
+              onClick={() => handleDeleteClick(row.original)}
+            >
+              <Trash2 className="size-3.5" />
+              <span className="sr-only">Delete</span>
+            </Button>
+          </div>
+        )
+      }
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  )
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
@@ -195,7 +306,6 @@ export default function ConnectionPage() {
               Manage your database connections across all branches and sites.
             </CardDescription>
           </div>
-
           <Button size="sm" className="shrink-0 gap-2" onClick={handleCreate}>
             <Plus className="size-4" />
             New Connection
@@ -204,72 +314,42 @@ export default function ConnectionPage() {
 
         <Separator />
 
-        {/* Body */}
-        <CardContent className="min-h-0 flex-1 overflow-auto p-0">
-          {connections.length === 0 ? (
-            <EmptyState onCreateClick={handleCreate} />
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead>Name</TableHead>
-                  <TableHead>Group</TableHead>
-                  <TableHead>Static IP</TableHead>
-                  <TableHead>VPN IP</TableHead>
-                  <TableHead>Database</TableHead>
-                  <TableHead>Financial Year</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-
-              <TableBody>
-                {connections.map((conn) => (
-                  <TableRow key={conn.id}>
-                    <TableCell className="font-medium">{conn.name}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="text-xs font-normal">
-                        {conn.group}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-sm text-muted-foreground">
-                      {conn.staticIp}
-                    </TableCell>
-                    <TableCell className="font-mono text-sm text-muted-foreground">
-                      {conn.vpnIp}
-                    </TableCell>
-                    <TableCell className="font-mono text-sm">{conn.database}</TableCell>
-                    <TableCell className="text-sm">{conn.financialYear}</TableCell>
-                    <TableCell>
-                      <StatusBadge status={conn.status} />
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-7"
-                          onClick={() => handleEdit(conn)}
-                        >
-                          <Pencil className="size-3.5" />
-                          <span className="sr-only">Edit</span>
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-7 text-destructive hover:text-destructive"
-                          onClick={() => handleDeleteClick(conn)}
-                        >
-                          <Trash2 className="size-3.5" />
-                          <span className="sr-only">Delete</span>
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
+        {/* DataGrid */}
+        <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
+          <DataGrid<Connection>
+            data={connections}
+            columns={columns}
+            persistStateKey="connections-grid"
+            selectionMode="multiple"
+            className="flex-1 rounded-none border-0"
+            enableColumnResizing={true}
+            // enableVirtualization={true}
+            toolbar={{
+              showSearch: true,
+              showExport: true,
+              showImport: true,
+              showColumnToggle: true,
+              showFilterPanel: true,
+              showDensityToggle: true
+            }}
+            renderEmptyState={() => (
+              <div className="flex flex-col items-center justify-center gap-4 py-20 text-center">
+                <div className="flex size-16 items-center justify-center rounded-2xl bg-muted">
+                  <Database className="size-8 text-muted-foreground" />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <h3 className="text-base font-semibold">No connections yet</h3>
+                  <p className="max-w-xs text-sm text-muted-foreground">
+                    Add your first database connection to get started.
+                  </p>
+                </div>
+                <Button size="sm" onClick={handleCreate} className="gap-2">
+                  <Plus className="size-4" />
+                  New Connection
+                </Button>
+              </div>
+            )}
+          />
         </CardContent>
       </Card>
 
