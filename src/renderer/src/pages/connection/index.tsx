@@ -1,18 +1,12 @@
 import { useMemo, useState } from 'react'
-import { Database, Pencil, Plus, ServerCrash, Trash2, Wifi, WifiOff } from 'lucide-react'
+import { Database, Plus, ServerCrash, Wifi, WifiOff } from 'lucide-react'
 
 import { DataGrid, type DataGridColumnDef } from '@/components/data-grid'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle
-} from '@/components/ui/dialog'
+import { DeleteConfirmDialog } from '@/components/ui/delete-confirm-dialog'
+import { RowActionsMenu } from '@/components/ui/row-actions-menu'
 import { Separator } from '@/components/ui/separator'
 
 import { ConnectionForm, type ConnectionFormValues } from './components/form'
@@ -160,6 +154,17 @@ export default function ConnectionPage() {
     }
   }
 
+  function handleDuplicate(connection: Connection) {
+    const duplicate: Connection = {
+      ...connection,
+      id: crypto.randomUUID(),
+      name: `${connection.name} (Copy)`,
+      status: 'unknown',
+      createdAt: new Date().toISOString().split('T')[0]
+    }
+    setConnections((prev) => [duplicate, ...prev])
+  }
+
   function handleFormSubmit(values: ConnectionFormValues) {
     if (formMode === 'create') {
       const newConnection: Connection = {
@@ -261,27 +266,14 @@ export default function ConnectionPage() {
         header: '',
         enableSorting: false,
         enableHiding: false,
-        size: 80,
+        size: 52,
         cell: ({ row }) => (
-          <div className="flex items-center justify-end gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7"
-              onClick={() => handleEdit(row.original)}
-            >
-              <Pencil className="size-3.5" />
-              <span className="sr-only">Edit</span>
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7 text-destructive hover:text-destructive"
-              onClick={() => handleDeleteClick(row.original)}
-            >
-              <Trash2 className="size-3.5" />
-              <span className="sr-only">Delete</span>
-            </Button>
+          <div className="flex items-center justify-end">
+            <RowActionsMenu
+              onEdit={() => handleEdit(row.original)}
+              onDuplicate={() => handleDuplicate(row.original)}
+              onDelete={() => handleDeleteClick(row.original)}
+            />
           </div>
         )
       }
@@ -363,29 +355,19 @@ export default function ConnectionPage() {
       />
 
       {/* Delete Confirmation Dialog */}
-      <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-base">
-              <Trash2 className="size-4 text-destructive" />
-              Delete Connection
-            </DialogTitle>
-            <DialogDescription className="text-sm">
-              Are you sure you want to delete{' '}
-              <span className="font-medium text-foreground">"{deleteTarget?.name}"</span>? This
-              action cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" size="sm" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button variant="destructive" size="sm" onClick={handleDeleteConfirm}>
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete Connection"
+        description={
+          <>
+            Are you sure you want to delete{' '}
+            <span className="font-medium text-foreground">"{deleteTarget?.name}"</span>? This action
+            cannot be undone.
+          </>
+        }
+        onConfirm={handleDeleteConfirm}
+      />
     </div>
   )
 }

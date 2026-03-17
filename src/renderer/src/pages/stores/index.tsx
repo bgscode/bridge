@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react'
-import { Store, Pencil, Plus, Trash2 } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Store, Plus } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
+import { DataGrid, type DataGridColumnDef } from '@/components/data-grid'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { DeleteConfirmDialog } from '@/components/ui/delete-confirm-dialog'
 import {
   Dialog,
   DialogContent,
@@ -17,15 +19,8 @@ import {
 } from '@/components/ui/dialog'
 import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { RowActionsMenu } from '@/components/ui/row-actions-menu'
 import { Separator } from '@/components/ui/separator'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow
-} from '@/components/ui/table'
 import type { StoreRow } from '@shared/index'
 
 // ─── Form Schema ──────────────────────────────────────────────────────────────
@@ -127,6 +122,28 @@ export default function StoresPage() {
     window.api.stores.getAll().then(setStores)
   }, [])
 
+  // ── Handlers ───────────────────────────────────────────────────────────────
+
+  function handleCreate() {
+    setSelected(null)
+    setFormMode('create')
+    setFormOpen(true)
+  }
+
+  function handleEdit(store: StoreRow) {
+    setSelected(store)
+    setFormMode('edit')
+    setFormOpen(true)
+  }
+
+  async function handleDuplicate(store: StoreRow) {
+    const created = (await window.api.stores.create({
+      name: `${store.name} (Copy)`,
+      code: `${store.code}-COPY`
+    })) as StoreRow
+    setStores((prev) => [created, ...prev])
+  }
+
   async function handleSubmit(values: FormValues) {
     if (formMode === 'create') {
       const created = (await window.api.stores.create(values)) as StoreRow
@@ -144,9 +161,61 @@ export default function StoresPage() {
     setDeleteTarget(null)
   }
 
+  // ── Column Definitions ─────────────────────────────────────────────────────
+
+  const columns = useMemo<DataGridColumnDef<StoreRow>[]>(
+    () => [
+      {
+        accessorKey: 'name',
+        header: 'Name',
+        cell: ({ row }) => <span className="font-medium">{row.original.name}</span>,
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'code',
+        header: 'Code',
+        cell: ({ row }) => (
+          <Badge variant="secondary" className="font-mono text-xs">
+            {row.original.code}
+          </Badge>
+        ),
+        meta: { filterType: 'text', resizable: true }
+      },
+      {
+        accessorKey: 'created_at',
+        header: 'Created',
+        cell: ({ row }) => (
+          <span className="text-sm text-muted-foreground">{row.original.created_at}</span>
+        ),
+        meta: { filterType: 'date', resizable: true }
+      },
+      {
+        id: 'actions',
+        header: '',
+        enableSorting: false,
+        enableHiding: false,
+        size: 52,
+        cell: ({ row }) => (
+          <div className="flex items-center justify-end">
+            <RowActionsMenu
+              onEdit={() => handleEdit(row.original)}
+              onDuplicate={() => handleDuplicate(row.original)}
+              onDelete={() => setDeleteTarget(row.original)}
+            />
+          </div>
+        )
+      }
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  )
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
       <Card className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {/* Header */}
         <CardHeader className="flex flex-row items-start justify-between gap-4 pb-4">
           <div className="flex flex-col gap-1">
             <CardTitle className="flex items-center gap-2 text-base font-semibold">
@@ -155,91 +224,52 @@ export default function StoresPage() {
             </CardTitle>
             <CardDescription className="text-sm">Manage store locations.</CardDescription>
           </div>
-          <Button
-            size="sm"
-            className="shrink-0 gap-2"
-            onClick={() => {
-              setSelected(null)
-              setFormMode('create')
-              setFormOpen(true)
-            }}
-          >
-            <Plus className="size-4" /> New Store
+          <Button size="sm" className="shrink-0 gap-2" onClick={handleCreate}>
+            <Plus className="size-4" />
+            New Store
           </Button>
         </CardHeader>
+
         <Separator />
-        <CardContent className="min-h-0 flex-1 overflow-auto p-0">
-          {stores.length === 0 ? (
-            <div className="flex flex-col items-center gap-3 py-20 text-center">
-              <Store className="size-10 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">
-                No stores yet. Create one to get started.
-              </p>
-              <Button
-                size="sm"
-                onClick={() => {
-                  setSelected(null)
-                  setFormMode('create')
-                  setFormOpen(true)
-                }}
-              >
-                <Plus className="size-4 mr-1" /> New Store
-              </Button>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow className="hover:bg-transparent">
-                  <TableHead>Name</TableHead>
-                  <TableHead>Code</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {stores.map((store) => (
-                  <TableRow key={store.id}>
-                    <TableCell className="font-medium">{store.name}</TableCell>
-                    <TableCell>
-                      <Badge variant="secondary" className="font-mono text-xs">
-                        {store.code}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {store.created_at}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-7"
-                          onClick={() => {
-                            setSelected(store)
-                            setFormMode('edit')
-                            setFormOpen(true)
-                          }}
-                        >
-                          <Pencil className="size-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-7 text-destructive hover:text-destructive"
-                          onClick={() => setDeleteTarget(store)}
-                        >
-                          <Trash2 className="size-3.5" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
+
+        {/* DataGrid */}
+        <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
+          <DataGrid<StoreRow>
+            data={stores}
+            columns={columns}
+            persistStateKey="stores-grid"
+            selectionMode="multiple"
+            className="flex-1 rounded-none border-0"
+            enableColumnResizing={true}
+            toolbar={{
+              showSearch: true,
+              showExport: true,
+              showColumnToggle: true,
+              showFilterPanel: true,
+              showDensityToggle: true
+            }}
+            renderEmptyState={() => (
+              <div className="flex flex-col items-center justify-center gap-4 py-20 text-center">
+                <div className="flex size-16 items-center justify-center rounded-2xl bg-muted">
+                  <Store className="size-8 text-muted-foreground" />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <h3 className="text-base font-semibold">No stores yet</h3>
+                  <p className="max-w-xs text-sm text-muted-foreground">
+                    Add your first store to get started.
+                  </p>
+                </div>
+                <Button size="sm" onClick={handleCreate} className="gap-2">
+                  <Plus className="size-4" />
+                  New Store
+                </Button>
+              </div>
+            )}
+          />
         </CardContent>
       </Card>
 
+      {/* Form Dialog */}
       <StoreForm
         isOpen={formOpen}
         onOpenChange={setFormOpen}
@@ -248,28 +278,20 @@ export default function StoresPage() {
         onSubmit={handleSubmit}
       />
 
-      <Dialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Trash2 className="size-4 text-destructive" /> Delete Store
-            </DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete{' '}
-              <span className="font-medium text-foreground">"{deleteTarget?.name}"</span>? This
-              cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" size="sm" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button variant="destructive" size="sm" onClick={handleDeleteConfirm}>
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Delete Confirmation */}
+      <DeleteConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Delete Store"
+        description={
+          <>
+            Are you sure you want to delete{' '}
+            <span className="font-medium text-foreground">"{deleteTarget?.name}"</span>? This action
+            cannot be undone.
+          </>
+        }
+        onConfirm={handleDeleteConfirm}
+      />
     </div>
   )
 }
