@@ -148,6 +148,7 @@ function toGoogleSheetTabName(value: string): string {
 }
 
 function normalizeNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
 }
@@ -955,8 +956,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                       options={groupOptions}
                       value={filterGroup ?? undefined}
                       onChange={(v) => {
-                        setFilterGroup(normalizeNumber(v))
-                        setValue('connection_ids', [])
+                        const next = normalizeNumber(v)
+                        setFilterGroup(next)
+                        // Preserve all currently selected connections; do not modify `connection_ids` here
                       }}
                       placeholder="Group…"
                       clearable
@@ -966,8 +968,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                       options={storeOptions}
                       value={filterStore ?? undefined}
                       onChange={(v) => {
-                        setFilterStore(normalizeNumber(v))
-                        setValue('connection_ids', [])
+                        const next = normalizeNumber(v)
+                        setFilterStore(next)
+                        // Preserve all currently selected connections; do not modify `connection_ids` here
                       }}
                       placeholder="Store…"
                       clearable
@@ -977,8 +980,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                       options={fiscalYearOptions}
                       value={filterFiscalYear ?? undefined}
                       onChange={(v) => {
-                        setFilterFiscalYear(normalizeNumber(v))
-                        setValue('connection_ids', [])
+                        const next = normalizeNumber(v)
+                        setFilterFiscalYear(next)
+                        // Preserve all currently selected connections; do not modify `connection_ids` here
                       }}
                       placeholder="Fiscal Year…"
                       clearable
