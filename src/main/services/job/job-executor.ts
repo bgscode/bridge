@@ -710,31 +710,9 @@ function applyStatusStyle(cell: ExcelJS.Cell, rawStatus: string | null | undefin
   }
 }
 
-function styleDataSheet(sheet: ExcelJS.Worksheet): void {
-  if (sheet.rowCount === 0) return
-  applyHeaderStyle(sheet, 1, 'FF0EA5E9')
-  sheet.views = [{ state: 'frozen', ySplit: 1 }]
-
-  for (let i = 2; i <= sheet.rowCount; i++) {
-    if (i % 2 === 0) {
-      const row = sheet.getRow(i)
-      row.eachCell((cell) => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8FAFC' } }
-      })
-    }
-  }
-
-  sheet.columns.forEach((col) => {
-    const headerText = col.header ? String(col.header) : ''
-    let max = Math.max(12, headerText.length + 2)
-    col.eachCell?.({ includeEmpty: false }, (cell) => {
-      const v = cell.value
-      const text = v === null || v === undefined ? '' : String(v)
-      max = Math.max(max, Math.min(45, text.length + 2))
-    })
-    col.width = max
-  })
-}
+// Data-sheet styling has been removed — styling per row across millions of
+// rows blew up memory and slowed the writer down. Only the Summary sheet is
+// styled now.
 
 // ─── Streaming Excel writer ───────────────────────────────────────────────────
 
@@ -974,6 +952,36 @@ async function writeStreamingExcel(
     filePath = path.join(baseDir, parsed.base)
   }
 
+  // ── Replace short-circuit ────────────────────────────────────────────────
+  // `replace` means "overwrite the destination workbook with this run's
+  // output". The legacy in-memory path below would `workbook.xlsx.readFile`
+  // an existing destination first, which OOMs on large (80 MB+) workbooks.
+  // For replace we always go through the streaming writer regardless of
+  // whether the destination file already exists or whether a template was
+  // provided — the template's previous contents are intentionally discarded.
+  if (effectiveOp === 'replace') {
+    // If the destination already exists, remove it first so the streaming
+    // writer never has to mmap or merge an existing 80 MB+ workbook.
+    if (fs.existsSync(filePath)) {
+      try {
+        await fs.promises.unlink(filePath)
+      } catch {
+        // Best-effort: if we can't delete (e.g. file locked), the writer
+        // below will overwrite via its create-truncate semantics anyway.
+      }
+    }
+    return await writeStreamingExcelReplace(
+      filePath,
+      jobName,
+      progress,
+      connections,
+      allChunkFiles,
+      queryNames,
+      allBucketMeta,
+      isCancelled
+    )
+  }
+
   if (hasTemplate && templateMode === 'new') {
     // NEW template: copy template to the output path, then append data sheets.
     let tplDir = path.dirname(filePath)
@@ -996,7 +1004,16 @@ async function writeStreamingExcel(
     effectiveOp = 'replace'
   }
 
-  if (!hasTemplate && effectiveOp === 'replace') {
+  if (effectiveOp === 'replace') {
+    // Append-mode-too-large fallback above flipped us to replace. Same
+    // streaming path as the early-out — never load an existing workbook.
+    if (fs.existsSync(filePath)) {
+      try {
+        await fs.promises.unlink(filePath)
+      } catch {
+        // best-effort
+      }
+    }
     return await writeStreamingExcelReplace(
       filePath,
       jobName,
@@ -1016,10 +1033,9 @@ async function writeStreamingExcel(
   }
 
   const threshold = resolveSheetRowThreshold()
-  // When writing INTO a user-supplied template, never apply our own styles to
-  // data sheets — the template owns its formatting. Untouched sheets are
-  // already left alone (the loop only iterates `buckets`).
-  const styleData = !hasTemplate
+  // Data sheets are never styled — only the Summary sheet gets formatting.
+  // This keeps memory + write-time flat across millions of rows and avoids
+  // clobbering any styling a user-provided template may already own.
   const taken = new Set<string>()
   for (const ws of workbook.worksheets) taken.add(ws.name.toLowerCase())
   taken.add('summary')
@@ -1084,7 +1100,9 @@ async function writeStreamingExcel(
       } else if (!bucket.columns.length) {
         sheet.addRow({ msg: 'No rows found' })
       }
-      if (styleData) styleDataSheet(sheet)
+      // Data sheets are intentionally left unstyled — styling per row across
+      // millions of rows blows up memory and slows the writer down. Only the
+      // Summary sheet is styled.
       continue
     }
 
@@ -1100,7 +1118,6 @@ async function writeStreamingExcel(
         }
         firstRowSeen = true
         if (rowsInSheet >= threshold) {
-          if (styleData) styleDataSheet(sheet)
           rolloverIndex++
           const nextName = nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
           sheet = workbook.addWorksheet(nextName)
@@ -1114,7 +1131,7 @@ async function writeStreamingExcel(
       void firstRowSeen
     }
 
-    if (styleData) styleDataSheet(sheet)
+    // No data-sheet styling — see Summary-only styling note above.
   }
 
   writeSummarySheet(workbook, jobName, progress, connections, queryNames, allBucketMeta)
@@ -1177,9 +1194,8 @@ async function writeStreamingExcelReplace(
       let rowsInSheet = 0
 
       const writeHeader = (): void => {
+        // Plain header row — no styling on data sheets (only Summary is styled).
         const hr = sheet.addRow(headers)
-        hr.font = { bold: true, color: { argb: 'FFFFFFFF' } }
-        hr.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0EA5E9' } }
         hr.commit()
         rowsInSheet = 1
       }
