@@ -15,9 +15,8 @@ export const windowConfig: BrowserWindowConstructorOptions = {
   ...(isMac
     ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 15, y: 15 } }
     : { frame: false }),
-  // Transparent only on macOS (Windows transparent + frameless has glitches)
-  transparent: isMac,
-  backgroundColor: isMac ? undefined : '#0b0b0b',
+  transparent: false,
+  backgroundColor: '#0b0b0b',
   webPreferences: {
     preload: join(__dirname, '../preload/index.js'),
     sandbox: false,
