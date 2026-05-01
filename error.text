@@ -1,0 +1,6 @@
+<--- Last few GCs --->
+
+[696:000027DC00210000]   568471 ms: Scavenge (during sweeping) 3634.3 (3760.8) -> 3624.2 (3760.8) MB, pooled: 0.0 MB, 10.76 / 0.00 ms (average mu = 0.233, current mu = 0.226) allocation failure;
+[696:000027DC00210000]   572079 ms: Mark-Compact (reduce) 3724.4 (3845.8) -> 3399.4 (3522.9) MB, pooled: 0.0 MB, 2734.64 / 0.00 ms (+ 709.0 ms in 245 steps since start of marking, biggest step 7.9 ms, walltime since start of marking 3607 ms) (average mu =
+[696:0501/131402.251:ERROR:electron\shell\common\node_bindings.cc:182] OOM error in V8: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory
+[696:0501/131402.256:ERROR:third_party\crashpad\crashpad\client\crashpad_client_win.cc:869] not connected
