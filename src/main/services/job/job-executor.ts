@@ -38,6 +38,20 @@ const cancelledJobs = new Set<number>()
 const jobRetries = new Map<number, Map<number, number>>()
 
 /**
+ * Marker error thrown by output writers when the user cancels a job mid-write.
+ * Carries the partial output path so `runJob` can delete it — we never want a
+ * misleading half-written file to look like a completed run on disk.
+ */
+class JobCancelledError extends Error {
+  partialPath: string | null
+  constructor(partialPath: string | null = null) {
+    super('Job cancelled by user')
+    this.name = 'JobCancelledError'
+    this.partialPath = partialPath
+  }
+}
+
+/**
  * Active SQL resources per running job — used to make cancellation IMMEDIATE.
  * As soon as `cancelJob(id)` is called we (a) flag the cancellation in
  * `cancelledJobs`, (b) abort every open mssql request, and (c) close every
@@ -100,12 +114,14 @@ export function cancelJob(jobId: number): boolean {
 // ─── Emit helper ──────────────────────────────────────────────────────────────
 
 /**
- * Returns Desktop/<AppName>/ as the fallback output base directory when the
- * configured destination path is inaccessible (e.g. a mapped network drive or
- * Windows drive letter that doesn't exist on this machine).
+ * Returns Desktop/<AppName>_job_output/ as the fallback output base directory
+ * when the configured destination path is inaccessible (e.g. a mapped network
+ * drive or Windows drive letter that doesn't exist on this machine), or when
+ * the job has no destination configured at all. Files always land here as a
+ * last resort so users never lose a run's output.
  */
 function appDesktopBaseDir(): string {
-  return path.join(app.getPath('desktop'), app.getName())
+  return path.join(app.getPath('desktop'), `${app.getName()}_job_output`)
 }
 
 function emit(webContents: WebContents, progress: JobProgress): void {
@@ -740,7 +756,8 @@ function resolveSheetRowThreshold(): number {
 /**
  * Build the list of output buckets that should be written to the workbook,
  * one entry per (connection, optional query index). Each bucket becomes one
- * or more sheets (with `_2`, `_3` … rollovers when the row threshold is hit).
+ * or more sheets (with `_part1`, `_part2` … rollovers when the row threshold
+ * is hit and the bucket is large enough to need splitting).
  */
 interface OutputBucket {
   tag: string
@@ -752,6 +769,8 @@ interface OutputBucket {
   columns: string[]
   /** Per-bucket error message — used to emit an "error" sheet/file when no rows were written. */
   error: string | null
+  /** Total rows captured for this bucket — used to pre-decide split naming. */
+  rows: number
 }
 
 /**
@@ -787,7 +806,8 @@ function listOutputBuckets(
       chunkFiles,
       label: chunkSheetLabel(connection, queryIdx, queryNames),
       columns: meta?.columns ?? [],
-      error: meta?.error ?? null
+      error: meta?.error ?? null,
+      rows: meta?.rows ?? 0
     })
   }
 
@@ -806,7 +826,8 @@ function listOutputBuckets(
       chunkFiles: [],
       label: chunkSheetLabel(connection, queryIdx, queryNames),
       columns: meta.columns,
-      error: meta.error
+      error: meta.error,
+      rows: meta.rows
     })
   }
 
@@ -836,7 +857,8 @@ function listOutputBuckets(
               chunkFiles: [],
               label: chunkSheetLabel(conn, qi, queryNames),
               columns: meta?.columns ?? [],
-              error: meta?.error ?? null
+              error: meta?.error ?? null,
+              rows: meta?.rows ?? 0
             })
           }
         }
@@ -855,7 +877,8 @@ function listOutputBuckets(
             chunkFiles: [],
             label: chunkSheetLabel(conn, null),
             columns: [],
-            error: null
+            error: null,
+            rows: 0
           })
         }
       }
@@ -871,27 +894,37 @@ function listOutputBuckets(
   return buckets
 }
 
-function nextRolloverSheetName(base: string, index: number, taken: Set<string>): string {
+function nextRolloverSheetName(
+  base: string,
+  index: number,
+  taken: Set<string>,
+  splitNaming: boolean = false
+): string {
   const safe = sanitizeSheetName(base)
-  if (index === 0) {
-    // Reserve base in taken set and return as-is (unique within this job).
+  // When the bucket is known to overflow the sheet-row threshold we name
+  // every sheet `{base}_part{n}` (starting at part1) so users can tell at a
+  // glance that the dataset was split. For buckets that fit in one sheet we
+  // keep the bare base name to avoid noisy `_part1` suffixes everywhere.
+  if (!splitNaming && index === 0) {
     const key = safe.toLowerCase()
     if (!taken.has(key)) {
       taken.add(key)
       return safe
     }
   }
-  const stem = safe.slice(0, 28)
-  let i = Math.max(2, index + 1)
+  // Reserve room for the suffix (`_partNN` ≈ 7 chars) inside Excel's 31-char
+  // sheet-name limit so the part suffix is never truncated.
+  const stem = safe.slice(0, 24)
+  let i = splitNaming ? Math.max(1, index + 1) : Math.max(2, index + 1)
   for (;;) {
-    const candidate = `${stem}_${i}`
+    const candidate = `${stem}_part${i}`
     if (!taken.has(candidate.toLowerCase())) {
       taken.add(candidate.toLowerCase())
       return candidate
     }
     i++
     if (i > 9999) {
-      const fb = `${stem}_${Date.now() % 10_000}`
+      const fb = `${stem}_part${Date.now() % 10_000}`
       taken.add(fb.toLowerCase())
       return fb
     }
@@ -910,7 +943,8 @@ async function writeStreamingExcel(
     templateMode: 'new' | 'existing' | null
   },
   queryNames: string[] = [],
-  allBucketMeta: Map<string, BucketMeta> = new Map()
+  allBucketMeta: Map<string, BucketMeta> = new Map(),
+  isCancelled: () => boolean = () => false
 ): Promise<string> {
   let filePath: string
   let effectiveOp = operation
@@ -970,7 +1004,8 @@ async function writeStreamingExcel(
       connections,
       allChunkFiles,
       queryNames,
-      allBucketMeta
+      allBucketMeta,
+      isCancelled
     )
   }
 
@@ -991,7 +1026,9 @@ async function writeStreamingExcel(
 
   const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
   for (const bucket of buckets) {
+    if (isCancelled()) throw new JobCancelledError()
     const baseSheetName = sanitizeSheetName(bucket.label)
+    const willSplit = bucket.rows > threshold
     const existing = workbook.getWorksheet(baseSheetName)
 
     // Acquire initial sheet (append to existing when op=append, else replace).
@@ -1005,7 +1042,7 @@ async function writeStreamingExcel(
         taken.delete(existing.name.toLowerCase())
         workbook.removeWorksheet(existing.id)
       }
-      const name = nextRolloverSheetName(baseSheetName, 0, taken)
+      const name = nextRolloverSheetName(baseSheetName, 0, taken, willSplit)
       sheet = workbook.addWorksheet(name)
     }
 
@@ -1054,6 +1091,7 @@ async function writeStreamingExcel(
     for (const chunkFile of bucket.chunkFiles) {
       let firstRowSeen = false
       await streamChunkRows(chunkFile, (row) => {
+        if (isCancelled()) throw new JobCancelledError()
         if (!headersSet) {
           headers = Object.keys(row)
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
@@ -1064,7 +1102,7 @@ async function writeStreamingExcel(
         if (rowsInSheet >= threshold) {
           if (styleData) styleDataSheet(sheet)
           rolloverIndex++
-          const nextName = nextRolloverSheetName(baseSheetName, rolloverIndex, taken)
+          const nextName = nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
           sheet = workbook.addWorksheet(nextName)
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
           rowsInSheet = 1
@@ -1102,7 +1140,8 @@ async function writeStreamingExcelReplace(
   connections: ConnectionRow[],
   allChunkFiles: Map<string, string[]>,
   queryNames: string[] = [],
-  allBucketMeta: Map<string, BucketMeta> = new Map()
+  allBucketMeta: Map<string, BucketMeta> = new Map(),
+  isCancelled: () => boolean = () => false
 ): Promise<string> {
   let resolvedDir = path.dirname(filePath)
   try {
@@ -1120,15 +1159,19 @@ async function writeStreamingExcelReplace(
     useSharedStrings: false
   })
 
+  try {
+
   const threshold = resolveSheetRowThreshold()
   const taken = new Set<string>()
   taken.add('summary')
 
   const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
   for (const bucket of buckets) {
+    if (isCancelled()) throw new JobCancelledError()
     const baseSheetName = sanitizeSheetName(bucket.label)
+    const willSplit = bucket.rows > threshold
     let rolloverIndex = 0
-    let sheet = workbook.addWorksheet(nextRolloverSheetName(baseSheetName, 0, taken))
+    let sheet = workbook.addWorksheet(nextRolloverSheetName(baseSheetName, 0, taken, willSplit))
 
     let headers: string[] = []
     let hasHeader = false
@@ -1164,6 +1207,7 @@ async function writeStreamingExcelReplace(
 
     for (const chunkFile of bucket.chunkFiles) {
       await streamChunkRows(chunkFile, (row) => {
+        if (isCancelled()) throw new JobCancelledError()
         if (!hasHeader) {
           headers = Object.keys(row)
           writeHeader()
@@ -1172,7 +1216,9 @@ async function writeStreamingExcelReplace(
         if (rowsInSheet >= threshold) {
           sheet.commit()
           rolloverIndex++
-          sheet = workbook.addWorksheet(nextRolloverSheetName(baseSheetName, rolloverIndex, taken))
+          sheet = workbook.addWorksheet(
+            nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
+          )
           writeHeader()
         }
         const values = headers.map((key) => row[key] as ExcelJS.CellValue)
@@ -1322,6 +1368,26 @@ async function writeStreamingExcelReplace(
   summary.commit()
   await workbook.commit()
   return filePath
+  } catch (err) {
+    // Streaming WorkbookWriter has been appending to disk as we go, so any
+    // failure (including user cancellation) leaves a partial .xlsx behind.
+    // Try to close the writer cleanly, then remove the orphan file so the
+    // user never sees a misleading half-written output.
+    try {
+      await workbook.commit()
+    } catch {
+      // ignore — writer may already be in a bad state
+    }
+    try {
+      if (fs.existsSync(filePath)) await fs.promises.unlink(filePath)
+    } catch {
+      // best-effort cleanup
+    }
+    if (err instanceof JobCancelledError) {
+      err.partialPath = filePath
+    }
+    throw err
+  }
 }
 
 // ─── Summary sheet ────────────────────────────────────────────────────────────
@@ -1922,7 +1988,25 @@ export async function runJob(
   // the DB job row is the canonical config.
   const effectiveOnlineOnly =
     typeof options?.online_only === 'boolean' ? options.online_only : job.online_only
-  const effectiveDestinationConfig = job.destination_config
+
+  // Excel destination must always produce output, even when the job has no
+  // path configured or the configured path is unreachable. Fall back to
+  // `Desktop/<AppName>_job_output/` so the run is never silently dropped.
+  const isExcelDestination = !job.destination_type || job.destination_type === 'excel'
+  let effectiveDestinationConfig: string | null = job.destination_config
+  if (isExcelDestination) {
+    const cfg = typeof effectiveDestinationConfig === 'string' ? effectiveDestinationConfig : ''
+    const cfgValid = cfg.trim().length > 0 && (fs.existsSync(cfg) || fs.existsSync(path.dirname(cfg)))
+    if (!cfgValid) {
+      const fallback = appDesktopBaseDir()
+      try {
+        fs.mkdirSync(fallback, { recursive: true })
+      } catch {
+        // mkdir failures surface later when the writer attempts the same path
+      }
+      effectiveDestinationConfig = fallback
+    }
+  }
 
   const settings = settingsRepo.getAll()
   const jobTimeoutSec = Math.max(5, settings.job_query_timeout)
@@ -2003,43 +2087,18 @@ export async function runJob(
   )
   const maxRetries = Math.max(0, settings.job_max_retries)
 
-  let preflightDecision: ReturnType<typeof decideOutputFormat> | null = null
-  let preflightEstimatedRowsPerConn: number | null = null
-  let directCsvContext: DirectCsvContext | null = null
-
-  if (
-    job.destination_type === 'excel' &&
-    typeof effectiveDestinationConfig === 'string' &&
-    !isMultiQuery
-  ) {
-    preflightEstimatedRowsPerConn = await estimateRowsForSampleConnection(
-      connections[0],
-      queries,
-      jobTimeoutSec
-    )
-
-    if (preflightEstimatedRowsPerConn !== null) {
-      const estimatedTotalRows = preflightEstimatedRowsPerConn * connections.length
-      preflightDecision = decideOutputFormat({
-        totalRows: estimatedTotalRows,
-        connectionCount: connections.length,
-        maxParallel: configuredMax,
-        memoryUsage: 0,
-        preferred: 'auto'
-      })
-
-      if (preflightDecision.format === 'csv') {
-        try {
-          directCsvContext = await createDirectCsvContext(effectiveDestinationConfig, job.name)
-        } catch {
-          // Fall back to chunk-file path if preflight CSV context setup fails.
-          directCsvContext = null
-        }
-      }
-    }
-  }
-
-  // ── Adaptive Brain wiring ───────────────────────────────────────────────
+  // Excel destinations always produce an Excel workbook, regardless of size.
+  // We deliberately skip the legacy CSV-downgrade preflight here so a job
+  // with millions of rows still ends up as `.xlsx` (split across `_part1`,
+  // `_part2`, … sheets when it exceeds the per-sheet row threshold).
+  // The CSV-streaming helpers (`estimateRowsForSampleConnection`,
+  // `createDirectCsvContext`, `finalizeDirectCsvOutput`, `writeStreamingCsv`)
+  // are kept around as dead code for now in case the toggle returns later.
+  void estimateRowsForSampleConnection
+  void createDirectCsvContext
+  void finalizeDirectCsvOutput
+  void writeStreamingCsv
+  const directCsvContext: DirectCsvContext | null = null  // ── Adaptive Brain wiring ───────────────────────────────────────────────
   const brain = getAdaptiveBrain()
   brain.start()
 
@@ -2052,15 +2111,13 @@ export async function runJob(
   const isCancelled = (): boolean => cancelledJobs.has(jobId)
 
   // Initial (empty) adaptive state — refined on first snapshot
-  const initialFormatDecision =
-    preflightDecision ??
-    decideOutputFormat({
-      totalRows: 0,
-      connectionCount: connections.length,
-      maxParallel: configuredMax,
-      memoryUsage: 0,
-      preferred: job.destination_type === 'excel' ? 'auto' : 'auto'
-    })
+  const initialFormatDecision = decideOutputFormat({
+    totalRows: 0,
+    connectionCount: connections.length,
+    maxParallel: configuredMax,
+    memoryUsage: 0,
+    preferred: 'auto'
+  })
   progress.adaptive = {
     health_score: 1,
     cpu: 0,
@@ -2071,13 +2128,10 @@ export async function runJob(
     reason: 'warming up',
     active_workers: 0,
     target_workers: targetWorkers,
-    output_format: job.destination_type === 'excel' ? initialFormatDecision.format : null,
-    output_reason:
-      job.destination_type === 'excel'
-        ? preflightEstimatedRowsPerConn !== null
-          ? `preflight estimate: ${preflightEstimatedRowsPerConn.toLocaleString()} rows/connection, ${initialFormatDecision.reason}`
-          : initialFormatDecision.reason
-        : null
+    output_format: isExcelDestination ? 'excel-stream' : null,
+    output_reason: isExcelDestination
+      ? 'excel destination — streaming workbook'
+      : initialFormatDecision.reason
   }
 
   const updateAdaptiveState = (): void => {
@@ -2351,96 +2405,35 @@ export async function runJob(
   if (
     progress.status === 'running' &&
     shouldWriteOutput &&
-    job.destination_type &&
+    (job.destination_type || isExcelDestination) &&
     effectiveDestinationConfig
   ) {
     try {
-      if (job.destination_type === 'excel') {
+      if (isExcelDestination) {
         const destPath = effectiveDestinationConfig as string
-        let actualPath: string
-
-        if (directCsvContext) {
-          if (progress.adaptive) {
-            progress.adaptive.output_format = 'csv'
-            progress.adaptive.output_reason =
-              progress.adaptive.output_reason ?? 'preflight selected direct csv streaming'
-            progress.adaptive.reason = 'finalizing direct csv output'
-            throttled.emit(progress)
-          }
-
-          actualPath = await finalizeDirectCsvOutput(directCsvContext, progress)
-          directCsvFinalized = true
-
-          if (progress.adaptive) {
-            progress.adaptive.reason = 'csv output complete'
-          }
-        } else {
-          // Pick format adaptively based on final dataset + current system state
-          const snap = getSnapshot()
-          const decision = decideOutputFormat({
-            totalRows: progress.total_rows,
-            connectionCount: connections.length,
-            maxParallel: configuredMax,
-            memoryUsage: snap?.memory ?? 0,
-            preferred: 'auto'
-          })
-
-          if (progress.adaptive) {
-            progress.adaptive.output_format = decision.format
-            progress.adaptive.output_reason = decision.reason
-          }
-
-          if (decision.format === 'csv') {
-            if (progress.adaptive) {
-              progress.adaptive.reason = 'writing csv output (0%)'
-              throttled.emit(progress)
-            }
-
-            actualPath = await writeStreamingCsv(
-              destPath,
-              job.name,
-              progress,
-              connections,
-              allChunkFiles,
-              {
-                isCancelled,
-                onChunkWritten: (_chunkRows, totalRowsWritten, targetRows) => {
-                  if (progress.adaptive) {
-                    if (targetRows > 0) {
-                      const pct = Math.min(100, Math.round((totalRowsWritten / targetRows) * 100))
-                      progress.adaptive.reason = `writing csv output (${pct}%)`
-                    } else {
-                      progress.adaptive.reason = `writing csv output (${totalRowsWritten} rows)`
-                    }
-                  }
-                  throttled.emit(progress)
-                }
-              },
-              isMultiQuery ? (job.sql_query_names ?? []) : [],
-              allBucketMeta
-            )
-
-            if (progress.adaptive) {
-              progress.adaptive.reason = 'csv output complete'
-            }
-          } else {
-            // excel / excel-stream — writeStreamingExcel already streams when needed
-            actualPath = await writeStreamingExcel(
-              destPath,
-              job.operation,
-              job.name,
-              progress,
-              connections,
-              allChunkFiles,
-              {
-                templatePath: job.template_path,
-                templateMode: job.template_mode
-              },
-              isMultiQuery ? (job.sql_query_names ?? []) : [],
-              allBucketMeta
-            )
-          }
+        // Excel destination: always produce an Excel workbook regardless of
+        // dataset size. Sheets are split via `_part1`, `_part2`, … rollovers
+        // when a single connection exceeds the per-sheet row threshold.
+        if (progress.adaptive) {
+          progress.adaptive.output_format = 'excel-stream'
+          progress.adaptive.output_reason = 'excel destination — streaming workbook'
         }
+
+        const actualPath = await writeStreamingExcel(
+          destPath,
+          job.operation,
+          job.name,
+          progress,
+          connections,
+          allChunkFiles,
+          {
+            templatePath: job.template_path,
+            templateMode: job.template_mode
+          },
+          isMultiQuery ? (job.sql_query_names ?? []) : [],
+          allBucketMeta,
+          isCancelled
+        )
 
         progress.output_path = actualPath
       } else if (job.destination_type === 'api') {
@@ -2481,9 +2474,21 @@ export async function runJob(
         if (progress.adaptive) progress.adaptive.reason = 'google sheets output complete'
       }
     } catch (err) {
-      if (cancelledJobs.has(jobId)) {
+      if (err instanceof JobCancelledError || cancelledJobs.has(jobId)) {
         progress.status = 'cancelled'
         progress.error = 'Job cancelled by user'
+        // Discard any partial output file so a cancelled run never leaves a
+        // misleading half-written .xlsx behind on disk.
+        const partial =
+          err instanceof JobCancelledError ? err.partialPath : (progress.output_path ?? null)
+        if (partial) {
+          try {
+            if (fs.existsSync(partial)) await fs.promises.unlink(partial)
+          } catch {
+            // best-effort cleanup
+          }
+        }
+        progress.output_path = null
       } else {
         const errMsg = err instanceof Error ? err.message : 'Failed to write output'
         progress.error = errMsg
@@ -2507,6 +2512,20 @@ export async function runJob(
     } else {
       progress.status = 'success'
     }
+  }
+
+  // Cancelled runs must not advertise (or keep) a finished output file —
+  // even if the writer happened to complete before the cancel signal landed.
+  if (progress.status === 'cancelled' && progress.output_path) {
+    const stalePath = progress.output_path
+    try {
+      if (typeof stalePath === 'string' && fs.existsSync(stalePath)) {
+        await fs.promises.unlink(stalePath)
+      }
+    } catch {
+      // best-effort cleanup
+    }
+    progress.output_path = null
   }
   progress.finished_at = new Date().toISOString()
 

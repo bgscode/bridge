@@ -160,12 +160,13 @@ function JobCard({
     : 0
   const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
 
-  // Output is a CSV folder when adaptive engine chose CSV and output_path is a dir-like path.
+  // Output is a CSV folder whenever the job succeeded and the output path
+  // does NOT point to an Excel file — the path itself is ground truth.
+  // We no longer require the adaptive engine to explicitly record 'csv'
+  // because adaptive can be null or already flipped to 'excel-stream'
+  // after the combine step while the path is still a folder.
   const isCsvFolderOutput =
-    isSuccess &&
-    progress.output_path != null &&
-    !/\.(xlsx|xls)$/i.test(progress.output_path) &&
-    progress.adaptive?.output_format === 'csv'
+    isSuccess && progress.output_path != null && !/\.(xlsx|xls)$/i.test(progress.output_path)
 
   const runCombine = useCallback(async (): Promise<void> => {
     if (!progress.output_path) return
