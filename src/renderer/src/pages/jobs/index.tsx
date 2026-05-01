@@ -263,7 +263,15 @@ export default function JobsPage(): JSX.Element {
                   <DropdownMenuItem
                     onClick={(e) => {
                       e.stopPropagation()
-                      handleRunJob(row.original)
+                      // Retry only the connections that errored or never ran
+                      // on the previous run. Falls back to running every
+                      // connection when nothing was persisted (older runs).
+                      const ids = row.original.last_failed_connection_ids ?? []
+                      if (ids.length > 0) {
+                        run(row.original.id, { connection_ids: ids })
+                      } else {
+                        handleRunJob(row.original)
+                      }
                     }}
                   >
                     <RotateCcw className="size-4" />

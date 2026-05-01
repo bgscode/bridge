@@ -131,13 +131,19 @@ function JobCard({
 
   const isRunning = progress.status === 'running'
   const isSuccess = progress.status === 'success'
-  const isFailed = progress.status === 'failed' || progress.status === 'cancelled'
+  // Cancellation is no longer treated as a failure: when the user cancels a
+  // job we let the writer finish with whatever data was collected and the
+  // executor flips the run to 'success'. Only real failures paint red.
+  const isFailed = progress.status === 'failed'
 
-  // IDs of connections that errored on the latest run — used to power the
-  // "Retry failed connections" button. Computed off the live progress so the
-  // button matches what the user is currently seeing in the expanded list.
+  // IDs of connections that errored OR never ran on the latest run — used
+  // to power the "Retry failed connections" button. We include 'pending'
+  // (cancelled before reaching them) so cancel-then-retry resumes cleanly.
   const failedConnectionIds = useMemo(
-    () => progress.connections.filter((c) => c.status === 'error').map((c) => c.connection_id),
+    () =>
+      progress.connections
+        .filter((c) => c.status === 'error' || c.status === 'pending')
+        .map((c) => c.connection_id),
     [progress.connections]
   )
 

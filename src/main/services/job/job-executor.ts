@@ -38,20 +38,6 @@ const cancelledJobs = new Set<number>()
 const jobRetries = new Map<number, Map<number, number>>()
 
 /**
- * Marker error thrown by output writers when the user cancels a job mid-write.
- * Carries the partial output path so `runJob` can delete it — we never want a
- * misleading half-written file to look like a completed run on disk.
- */
-class JobCancelledError extends Error {
-  partialPath: string | null
-  constructor(partialPath: string | null = null) {
-    super('Job cancelled by user')
-    this.name = 'JobCancelledError'
-    this.partialPath = partialPath
-  }
-}
-
-/**
  * Active SQL resources per running job — used to make cancellation IMMEDIATE.
  * As soon as `cancelJob(id)` is called we (a) flag the cancellation in
  * `cancelledJobs`, (b) abort every open mssql request, and (c) close every
@@ -101,12 +87,14 @@ export function cancelJob(jobId: number): boolean {
     }
     handle.pools.clear()
   }
-  // Reflect cancellation in the live snapshot so the UI updates without
-  // waiting for the next throttled emit cycle.
+  // We deliberately do NOT mutate live.status to 'cancelled' here: the
+  // writer must complete with the data already collected, and the final
+  // state is decided in `runJob` finalize (which treats cancel as success
+  // when at least one connection finished). The UI uses cancelledJobs +
+  // adaptive reason for live feedback.
   const live = runningJobs.get(jobId)
-  if (live && live.status !== 'success' && live.status !== 'failed') {
-    live.status = 'cancelled'
-    live.error = live.error ?? 'Job cancelled by user'
+  if (live) {
+    live.error = live.error ?? 'Job cancelled by user — finishing output…'
   }
   return true
 }
@@ -220,6 +208,12 @@ interface StreamingConnectionResult {
    * still write a header-only output file for diagnostics.
    */
   columns: string[]
+  /**
+   * True when the connection bailed because the user cancelled the job
+   * before/while connecting. Used by the runner to keep the connection in
+   * 'pending' state (eligible for retry) rather than counting it as failed.
+   */
+  cancelled?: boolean
 }
 
 // ─── Temp file management ─────────────────────────────────────────────────────
@@ -464,6 +458,13 @@ async function executeStreamingForConnection(
     abortHandle?: JobAbortHandle
   }
 ): Promise<StreamingConnectionResult> {
+  // Fast-path: if the user already cancelled, don't even start a connection.
+  // Leave the per-connection progress in 'pending' so the jobs-list "Retry"
+  // action picks it up next time.
+  if (hooks?.isCancelled?.()) {
+    return { totalRows: 0, error: null, chunkFiles: [], columns: [], cancelled: true }
+  }
+
   connProgress.status = 'connecting'
   connProgress.started_at = new Date().toISOString()
 
@@ -472,15 +473,53 @@ async function executeStreamingForConnection(
   const chunkFiles: string[] = []
 
   try {
-    const connected = await connectUsingBestIp(conn, queryTimeoutSec, queryTimeoutSec)
+    // Race the connect attempt against cancellation so the worker doesn't
+    // hang for ~connect-timeout seconds when the user clicks Cancel while a
+    // host is unreachable.
+    const connectPromise = connectUsingBestIp(conn, queryTimeoutSec, queryTimeoutSec)
+    const connected = await new Promise<Awaited<typeof connectPromise>>((resolve, reject) => {
+      let settled = false
+      const poll = setInterval(() => {
+        if (settled) return
+        if (hooks?.isCancelled?.()) {
+          settled = true
+          clearInterval(poll)
+          reject(new Error('__CANCELLED__'))
+        }
+      }, 50)
+      connectPromise.then(
+        (r) => {
+          if (settled) {
+            // Cancel won the race — close the late-arriving pool.
+            r.pool.close().catch(() => {})
+            return
+          }
+          settled = true
+          clearInterval(poll)
+          resolve(r)
+        },
+        (e) => {
+          if (settled) return
+          settled = true
+          clearInterval(poll)
+          reject(e)
+        }
+      )
+    })
     pool = connected.pool
     hooks?.abortHandle?.pools.add(pool)
   } catch (err) {
-    const error = err instanceof Error ? err.message : 'Connection failed'
+    const message = err instanceof Error ? err.message : 'Connection failed'
+    if (message === '__CANCELLED__' || hooks?.isCancelled?.()) {
+      // User cancelled before/while connecting — don't mark failed.
+      connProgress.status = 'pending'
+      connProgress.finished_at = new Date().toISOString()
+      return { totalRows: 0, error: null, chunkFiles: [], columns: [], cancelled: true }
+    }
     connProgress.status = 'error'
-    connProgress.error = error
+    connProgress.error = message
     connProgress.finished_at = new Date().toISOString()
-    return { totalRows: 0, error, chunkFiles: [], columns: [] }
+    return { totalRows: 0, error: message, chunkFiles: [], columns: [] }
   }
 
   connProgress.status = 'querying'
@@ -492,6 +531,8 @@ async function executeStreamingForConnection(
   try {
     for (const query of queries) {
       if (!query.trim()) continue
+      // Bail between queries if cancellation arrived while previous one ran.
+      if (hooks?.isCancelled?.()) break
 
       // Use streaming request for large result sets
       const request = new mssql.Request(pool)
@@ -506,6 +547,23 @@ async function executeStreamingForConnection(
         await new Promise<void>((resolve, reject) => {
           let cancelled = false
           let lastFlush: Promise<void> = Promise.resolve()
+
+          // Poll for cancellation even when no rows are flowing (server still
+          // planning the query). Without this the worker hangs until query
+          // timeout when the user cancels mid-execution.
+          const cancelPoll = setInterval(() => {
+            if (cancelled) return
+            if (hooks?.isCancelled?.()) {
+              cancelled = true
+              try {
+                request.cancel()
+              } catch {
+                // ignore
+              }
+              clearInterval(cancelPoll)
+              resolve()
+            }
+          }, 50)
 
           // Capture column metadata as soon as it arrives so we can still write a
           // header-only error file when the query subsequently fails or yields
@@ -572,10 +630,16 @@ async function executeStreamingForConnection(
           })
 
           request.on('error', (err: Error) => {
+            clearInterval(cancelPoll)
+            if (cancelled) {
+              resolve()
+              return
+            }
             reject(err)
           })
 
           request.on('done', () => {
+            clearInterval(cancelPoll)
             lastFlush.then(() => resolve()).catch(reject)
           })
         })
@@ -909,6 +973,108 @@ function nextRolloverSheetName(
   }
 }
 
+/**
+ * Build the lowercase set of worksheet names that the writer will produce
+ * for `buckets` (including `_partN` rollovers). Used to decide which existing
+ * sheets in the destination workbook should be preserved when replacing.
+ */
+function bucketSheetNamePatterns(buckets: OutputBucket[]): {
+  exactNames: Set<string>
+  basePrefixes: string[]
+} {
+  const exactNames = new Set<string>()
+  const basePrefixes: string[] = []
+  for (const b of buckets) {
+    const base = sanitizeSheetName(b.label).toLowerCase()
+    exactNames.add(base)
+    // _part rollovers may also occur — match by 24-char stem prefix used by
+    // nextRolloverSheetName() to keep within Excel's 31-char limit.
+    const stem = sanitizeSheetName(b.label).slice(0, 24).toLowerCase()
+    basePrefixes.push(stem)
+  }
+  return { exactNames, basePrefixes }
+}
+
+/**
+ * Return true if `sheetName` corresponds to one of the bucket sheets the
+ * writer will (re)create — these are the only sheets we OVERWRITE on a
+ * replace run. Anything else (e.g. a manually added "Report" sheet) is
+ * preserved verbatim.
+ */
+function isBucketSheetName(
+  sheetName: string,
+  patterns: { exactNames: Set<string>; basePrefixes: string[] }
+): boolean {
+  const lc = sheetName.toLowerCase()
+  if (lc === 'summary') return true
+  if (patterns.exactNames.has(lc)) return true
+  for (const stem of patterns.basePrefixes) {
+    if (stem && lc.startsWith(stem) && /_part\d+$/.test(lc)) return true
+  }
+  return false
+}
+
+/**
+ * Snapshot of a worksheet's cells for re-emission via the streaming writer.
+ * Captured up-front from the existing destination so user-added sheets
+ * (e.g. a manually maintained "Report" tab) survive a replace-mode run.
+ */
+interface PreservedSheet {
+  name: string
+  rows: ExcelJS.CellValue[][]
+  columnWidths: Array<number | undefined>
+}
+
+/**
+ * Best-effort hard cap on the existing-file size we'll attempt to load
+ * in-memory to extract user-added sheets. ExcelJS' `readFile` mmaps the
+ * whole workbook so very large files (80 MB+) blow the V8 heap. Above this
+ * cap we skip preservation and fall back to a fresh streaming write — the
+ * user will see a warning in the run summary that custom sheets weren't
+ * preserved.
+ */
+const PRESERVE_SHEETS_MAX_BYTES = 30 * 1024 * 1024
+
+async function extractPreservedSheets(
+  filePath: string,
+  patterns: { exactNames: Set<string>; basePrefixes: string[] }
+): Promise<PreservedSheet[] | null> {
+  try {
+    if (!fs.existsSync(filePath)) return []
+    const stat = await fs.promises.stat(filePath)
+    if (stat.size > PRESERVE_SHEETS_MAX_BYTES) {
+      // Existing file too large to safely parse in memory — skip preservation.
+      return null
+    }
+    const wb = new ExcelJS.Workbook()
+    await wb.xlsx.readFile(filePath)
+    const out: PreservedSheet[] = []
+    wb.eachSheet((sheet) => {
+      if (isBucketSheetName(sheet.name, patterns)) return
+      const rows: ExcelJS.CellValue[][] = []
+      const widths: Array<number | undefined> = []
+      const cols = sheet.columns ?? []
+      for (const c of cols) widths.push(c?.width)
+      sheet.eachRow({ includeEmpty: true }, (row) => {
+        const values = row.values
+        // ExcelJS row.values is 1-indexed (index 0 is undefined). Slice off
+        // the leading hole so the array matches the column order.
+        if (Array.isArray(values)) {
+          rows.push(values.slice(1) as ExcelJS.CellValue[])
+        } else {
+          rows.push([])
+        }
+      })
+      out.push({ name: sheet.name, rows, columnWidths: widths })
+    })
+    return out
+  } catch {
+    // Corrupt/unsupported workbook — skip preservation rather than failing
+    // the whole run. Fresh streaming write proceeds without the user sheets.
+    return null
+  }
+}
+
 async function writeStreamingExcel(
   destPath: string,
   operation: 'append' | 'replace' | null,
@@ -921,8 +1087,7 @@ async function writeStreamingExcel(
     templateMode: 'new' | 'existing' | null
   },
   queryNames: string[] = [],
-  allBucketMeta: Map<string, BucketMeta> = new Map(),
-  isCancelled: () => boolean = () => false
+  allBucketMeta: Map<string, BucketMeta> = new Map()
 ): Promise<string> {
   let filePath: string
   let effectiveOp = operation
@@ -960,9 +1125,19 @@ async function writeStreamingExcel(
   // whether the destination file already exists or whether a template was
   // provided — the template's previous contents are intentionally discarded.
   if (effectiveOp === 'replace') {
-    // If the destination already exists, remove it first so the streaming
-    // writer never has to mmap or merge an existing 80 MB+ workbook.
+    // Preserve user-added sheets (e.g. a manually maintained "Report" tab)
+    // by extracting them BEFORE we delete the destination. Only sheets that
+    // don't correspond to a bucket label are kept; the writer will rewrite
+    // bucket sheets with this run's data and re-emit the preserved ones.
+    const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
+    const patterns = bucketSheetNamePatterns(buckets)
+    let preservedSheets: PreservedSheet[] = []
     if (fs.existsSync(filePath)) {
+      const extracted = await extractPreservedSheets(filePath, patterns)
+      if (extracted) preservedSheets = extracted
+      // If extracted === null the existing file was too big or unreadable —
+      // we proceed without preservation to avoid OOM.
+
       try {
         await fs.promises.unlink(filePath)
       } catch {
@@ -978,7 +1153,7 @@ async function writeStreamingExcel(
       allChunkFiles,
       queryNames,
       allBucketMeta,
-      isCancelled
+      preservedSheets
     )
   }
 
@@ -1021,8 +1196,7 @@ async function writeStreamingExcel(
       connections,
       allChunkFiles,
       queryNames,
-      allBucketMeta,
-      isCancelled
+      allBucketMeta
     )
   }
 
@@ -1042,7 +1216,7 @@ async function writeStreamingExcel(
 
   const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
   for (const bucket of buckets) {
-    if (isCancelled()) throw new JobCancelledError()
+    // Cancel does NOT abort the writer mid-flight (see writeStreamingExcelReplace).
     const baseSheetName = sanitizeSheetName(bucket.label)
     const willSplit = bucket.rows > threshold
     const existing = workbook.getWorksheet(baseSheetName)
@@ -1109,7 +1283,6 @@ async function writeStreamingExcel(
     for (const chunkFile of bucket.chunkFiles) {
       let firstRowSeen = false
       await streamChunkRows(chunkFile, (row) => {
-        if (isCancelled()) throw new JobCancelledError()
         if (!headersSet) {
           headers = Object.keys(row)
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
@@ -1158,7 +1331,7 @@ async function writeStreamingExcelReplace(
   allChunkFiles: Map<string, string[]>,
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
-  isCancelled: () => boolean = () => false
+  preservedSheets: PreservedSheet[] = []
 ): Promise<string> {
   let resolvedDir = path.dirname(filePath)
   try {
@@ -1182,8 +1355,12 @@ async function writeStreamingExcelReplace(
     taken.add('summary')
 
     const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
+    // Reserve preserved-sheet names so bucket sheets never collide with them.
+    for (const ps of preservedSheets) taken.add(ps.name.toLowerCase())
     for (const bucket of buckets) {
-      if (isCancelled()) throw new JobCancelledError()
+      // Cancel does NOT abort the writer mid-flight: we let whatever data
+      // was already streamed to disk be flushed to the output so users get
+      // a usable file even when they cancel partway through.
       const baseSheetName = sanitizeSheetName(bucket.label)
       const willSplit = bucket.rows > threshold
       let rolloverIndex = 0
@@ -1222,7 +1399,6 @@ async function writeStreamingExcelReplace(
 
       for (const chunkFile of bucket.chunkFiles) {
         await streamChunkRows(chunkFile, (row) => {
-          if (isCancelled()) throw new JobCancelledError()
           if (!hasHeader) {
             headers = Object.keys(row)
             writeHeader()
@@ -1243,6 +1419,19 @@ async function writeStreamingExcelReplace(
       }
 
       sheet.commit()
+    }
+
+    // Re-emit preserved (user-added) sheets so a replace run never destroys
+    // tabs the user manually created in the destination workbook.
+    for (const ps of preservedSheets) {
+      const ws = workbook.addWorksheet(ps.name)
+      if (ps.columnWidths.length > 0) {
+        ws.columns = ps.columnWidths.map((w) => ({ width: typeof w === 'number' ? w : 15 }))
+      }
+      for (const row of ps.rows) {
+        ws.addRow(row).commit()
+      }
+      ws.commit()
     }
 
     const summary = workbook.addWorksheet('Summary')
@@ -1385,9 +1574,11 @@ async function writeStreamingExcelReplace(
     return filePath
   } catch (err) {
     // Streaming WorkbookWriter has been appending to disk as we go, so any
-    // failure (including user cancellation) leaves a partial .xlsx behind.
-    // Try to close the writer cleanly, then remove the orphan file so the
-    // user never sees a misleading half-written output.
+    // failure leaves a partial .xlsx behind. Try to close the writer
+    // cleanly, then remove the orphan file so the user never sees a
+    // misleading half-written output. Cancel-mid-write is no longer
+    // possible (writers don't throw on cancel), so we don't need a
+    // separate cancel-cleanup branch here.
     try {
       await workbook.commit()
     } catch {
@@ -1397,9 +1588,6 @@ async function writeStreamingExcelReplace(
       if (fs.existsSync(filePath)) await fs.promises.unlink(filePath)
     } catch {
       // best-effort cleanup
-    }
-    if (err instanceof JobCancelledError) {
-      err.partialPath = filePath
     }
     throw err
   }
@@ -2280,6 +2468,9 @@ export async function runJob(
             }
 
             if (!result.error) break
+            // Cancellation: don't retry, don't sleep — finish immediately so
+            // the worker pool can drain and the writer phase can start.
+            if (result.cancelled || isCancelled()) break
 
             attempts++
             retryMap.set(conn.id, attempts)
@@ -2287,7 +2478,19 @@ export async function runJob(
             if (attempts > maxRetries) break
 
             const delay = 200 * Math.pow(2, attempts - 1)
-            await new Promise((resolve) => setTimeout(resolve, delay))
+            // Cancel-aware sleep: wake immediately if cancellation arrives.
+            await new Promise<void>((resolve) => {
+              const t = setTimeout(resolve, delay)
+              const poll = setInterval(() => {
+                if (isCancelled()) {
+                  clearTimeout(t)
+                  clearInterval(poll)
+                  resolve()
+                }
+              }, 50)
+              setTimeout(() => clearInterval(poll), delay + 10)
+            })
+            if (isCancelled()) break
 
             connProgress.status = 'pending'
             connProgress.error = null
@@ -2317,9 +2520,17 @@ export async function runJob(
           chunkFiles: aggregateChunkFiles.flatMap((x) => x.files),
           columns: aggregateBucketMeta[aggregateBucketMeta.length - 1]?.columns ?? []
         }
-        if (!aggregateError) {
+        // If we exited the plan because of a cancellation (no error and the
+        // executor returned `cancelled: true`), keep the connection 'pending'
+        // so it shows up in the retry list rather than counting as success.
+        const wasCancelled = isCancelled() && !aggregateError && aggregateRows === 0
+        if (!aggregateError && !wasCancelled) {
           connProgress.status = 'done'
           connProgress.rows = aggregateRows
+          connProgress.finished_at = new Date().toISOString()
+        } else if (wasCancelled) {
+          connProgress.status = 'pending'
+          connProgress.error = null
           connProgress.finished_at = new Date().toISOString()
         }
 
@@ -2357,7 +2568,12 @@ export async function runJob(
             rows: entry.rows
           })
         }
-        progress.completed_connections++
+        // Cancelled-mid-flight connections stay 'pending' and are NOT counted
+        // as completed — that way the floating progress bar doesn't claim
+        // false completion and the retry list picks them up.
+        if (!wasCancelled) {
+          progress.completed_connections++
+        }
 
         updateAdaptiveState()
         throttled.emit(progress)
@@ -2447,8 +2663,7 @@ export async function runJob(
             templateMode: job.template_mode
           },
           isMultiQuery ? (job.sql_query_names ?? []) : [],
-          allBucketMeta,
-          isCancelled
+          allBucketMeta
         )
 
         progress.output_path = actualPath
@@ -2490,26 +2705,12 @@ export async function runJob(
         if (progress.adaptive) progress.adaptive.reason = 'google sheets output complete'
       }
     } catch (err) {
-      if (err instanceof JobCancelledError || cancelledJobs.has(jobId)) {
-        progress.status = 'cancelled'
-        progress.error = 'Job cancelled by user'
-        // Discard any partial output file so a cancelled run never leaves a
-        // misleading half-written .xlsx behind on disk.
-        const partial =
-          err instanceof JobCancelledError ? err.partialPath : (progress.output_path ?? null)
-        if (partial) {
-          try {
-            if (fs.existsSync(partial)) await fs.promises.unlink(partial)
-          } catch {
-            // best-effort cleanup
-          }
-        }
-        progress.output_path = null
-      } else {
-        const errMsg = err instanceof Error ? err.message : 'Failed to write output'
-        progress.error = errMsg
-        progress.status = 'failed'
-      }
+      // Cancellation no longer interrupts the writer mid-flight (writers
+      // ignore the cancel flag and finish writing whatever data was already
+      // streamed). Anything caught here is a real write failure.
+      const errMsg = err instanceof Error ? err.message : 'Failed to write output'
+      progress.error = errMsg
+      progress.status = 'failed'
     }
   }
 
@@ -2519,33 +2720,27 @@ export async function runJob(
 
   // Finalize
   if (progress.status === 'running') {
-    if (cancelledJobs.has(jobId)) {
-      progress.status = 'cancelled'
-      progress.error = 'Job cancelled by user'
-    } else if (successfulConnections === 0) {
+    // Cancellation is treated as a successful early-exit: the user clicked
+    // Cancel deliberately, the writer completed with the data we managed to
+    // collect, and we do NOT want a red "failed" indicator. Status flips to
+    // 'failed' only when real connection errors occurred.
+    if (progress.failed_connections > 0 && successfulConnections === 0) {
       progress.status = 'failed'
-      progress.error = 'No connections were successful for this job run'
+      progress.error = progress.error ?? 'No connections were successful for this job run'
     } else {
       progress.status = 'success'
     }
   }
 
-  // Cancelled runs must not advertise (or keep) a finished output file —
-  // even if the writer happened to complete before the cancel signal landed.
-  if (progress.status === 'cancelled' && progress.output_path) {
-    const stalePath = progress.output_path
-    try {
-      if (typeof stalePath === 'string' && fs.existsSync(stalePath)) {
-        await fs.promises.unlink(stalePath)
-      }
-    } catch {
-      // best-effort cleanup
-    }
-    progress.output_path = null
-  }
   progress.finished_at = new Date().toISOString()
 
-  const dbStatus = progress.status === 'cancelled' ? 'failed' : progress.status
+  // Connections that errored OR never ran (cancelled before reaching them)
+  // are eligible for a one-click retry on the jobs list page.
+  const failedOrPendingIds = progress.connections
+    .filter((c) => c.status === 'error' || c.status === 'pending')
+    .map((c) => c.connection_id)
+
+  const dbStatus = progress.status
   jobRepository.update(jobId, {
     status: dbStatus,
     last_run_at: progress.finished_at,
@@ -2553,7 +2748,8 @@ export async function runJob(
       progress.error ??
       (progress.failed_connections > 0
         ? `${progress.failed_connections}/${progress.total_connections} connection(s) failed`
-        : null)
+        : null),
+    last_failed_connection_ids: failedOrPendingIds
   } as Partial<JobRow>)
 
   throttled.flush(progress)

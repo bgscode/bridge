@@ -177,6 +177,12 @@ export interface JobRow {
   status: 'idle' | 'running' | 'success' | 'failed'
   last_run_at: string | null
   last_error: string | null
+  /**
+   * Connection IDs that failed (or never ran due to cancellation) on the
+   * last run. Persisted so the jobs-list "Retry" action can re-run just the
+   * affected subset without re-processing successful connections.
+   */
+  last_failed_connection_ids: number[]
   remote_id?: string | null
   created_at: string
   updated_at: string
@@ -184,7 +190,13 @@ export interface JobRow {
 
 export type CreateJobDto = Omit<
   JobRow,
-  'id' | 'status' | 'last_run_at' | 'last_error' | 'created_at' | 'updated_at'
+  | 'id'
+  | 'status'
+  | 'last_run_at'
+  | 'last_error'
+  | 'last_failed_connection_ids'
+  | 'created_at'
+  | 'updated_at'
 >
 export type UpdateJobDto = Partial<CreateJobDto>
 

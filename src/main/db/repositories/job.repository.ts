@@ -8,13 +8,19 @@ import { CreateJobDto, JobRow, UpdateJobDto } from '@shared/index'
 /** DB row shape before parsing (everything is TEXT/INTEGER) */
 interface RawJobRow extends Omit<
   JobRow,
-  'connection_ids' | 'sql_query' | 'sql_query_names' | 'is_multi' | 'online_only'
+  | 'connection_ids'
+  | 'sql_query'
+  | 'sql_query_names'
+  | 'is_multi'
+  | 'online_only'
+  | 'last_failed_connection_ids'
 > {
   connection_ids: string
   sql_query: string
   sql_query_names: string
   is_multi: number
   online_only: number
+  last_failed_connection_ids: string | null
 }
 
 function parseRow(raw: RawJobRow): JobRow {
@@ -24,7 +30,8 @@ function parseRow(raw: RawJobRow): JobRow {
     sql_query: JSON.parse(raw.sql_query || '[]'),
     sql_query_names: JSON.parse(raw.sql_query_names || '[]'),
     is_multi: Boolean(raw.is_multi),
-    online_only: Boolean(raw.online_only)
+    online_only: Boolean(raw.online_only),
+    last_failed_connection_ids: JSON.parse(raw.last_failed_connection_ids || '[]')
   }
 }
 
@@ -69,7 +76,8 @@ const KNOWN_COLUMNS = new Set([
   'schedule',
   'status',
   'last_run_at',
-  'last_error'
+  'last_error',
+  'last_failed_connection_ids'
 ])
 
 function serializeForUpdate(data: Record<string, unknown>): Record<string, unknown> {
@@ -77,8 +85,8 @@ function serializeForUpdate(data: Record<string, unknown>): Record<string, unkno
   for (const [key, value] of Object.entries(data)) {
     if (value === undefined) continue
     if (!KNOWN_COLUMNS.has(key)) continue
-    if (key === 'connection_ids') {
-      out[key] = JSON.stringify(value)
+    if (key === 'connection_ids' || key === 'last_failed_connection_ids') {
+      out[key] = JSON.stringify(value ?? [])
     } else if (key === 'sql_query' || key === 'sql_query_names') {
       out[key] = JSON.stringify(value)
     } else if (key === 'is_multi' || key === 'online_only') {

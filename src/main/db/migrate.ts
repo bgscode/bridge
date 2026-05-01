@@ -322,6 +322,21 @@ const migrations: Migration[] = [
       upsert.run('excel_sheet_name_source', 'store_code')
       upsert.run('excel_create_empty_sheets', 'true')
     }
+  },
+  {
+    version: 18,
+    fn(db: Database.Database): void {
+      // Track which connections failed (or never ran) on the last job run,
+      // so the jobs-list "Retry" action can re-run just that subset.
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('last_failed_connection_ids')) {
+        db.exec(
+          "ALTER TABLE jobs ADD COLUMN last_failed_connection_ids TEXT NOT NULL DEFAULT '[]'"
+        )
+      }
+    }
   }
 ]
 
