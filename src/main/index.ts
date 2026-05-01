@@ -91,6 +91,15 @@
 import { app } from 'electron'
 import { bootstrap } from './app'
 
+// Raise the V8 heap limit for the main process so we can load very large
+// destination workbooks (200 MB+) into memory in order to preserve
+// user-added sheets — formulas, conditional formatting, charts, pivots,
+// merged cells, named ranges — bit-exact during a replace-mode job run.
+// ExcelJS' `readFile` materialises the whole workbook in the heap; the
+// default 4 GB ceiling is plenty, but on 32-bit builds or restricted
+// environments this bumps it explicitly.
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=8192')
+
 app.whenReady().then(bootstrap)
 
 app.on('window-all-closed', () => {

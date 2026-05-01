@@ -697,6 +697,56 @@ async function executeStreamingForConnection(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Format a single cell value coming from an SQL query result row.
+ * - Date objects            → "dd/mm/yyyy"
+ * - Date-only strings       → "dd/mm/yyyy"  (e.g. "2024-03-15", "2024-03-15T00:00:00.000Z")
+ * - DateTime strings        → "dd/mm/yyyy HH:MM:SS"
+ * - Everything else         → returned as-is (numbers, booleans, null, etc.)
+ *
+ * Applied to ALL query data sheets. The Summary sheet is NOT affected —
+ * it uses its own `formatUtcToIst` formatter.
+ */
+function formatQueryValue(v: unknown): unknown {
+  if (v === null || v === undefined) return v
+
+  let d: Date | null = null
+
+  if (v instanceof Date) {
+    d = v
+  } else if (typeof v === 'string') {
+    // Only attempt to parse strings that look like dates.
+    // Patterns: "2024-03-15", "2024-03-15T10:30:00", "2024-03-15T10:30:00.000Z",
+    //           "2024-03-15 10:30:00", "2024/03/15", etc.
+    if (/^\d{4}[-/]\d{2}[-/]\d{2}/.test(v)) {
+      const parsed = new Date(v)
+      if (!Number.isNaN(parsed.getTime())) d = parsed
+    }
+  }
+
+  if (!d) return v // not a date — pass through unchanged
+
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const dd = pad(d.getDate())
+  const mm = pad(d.getMonth() + 1)
+  const yyyy = d.getFullYear()
+
+  // Data sheets: always dd/mm/yyyy — no time component.
+  return `${dd}/${mm}/${yyyy}`
+}
+
+/**
+ * Apply `formatQueryValue` to every value in a row object, returning a
+ * new object with dates converted to dd/mm/yyyy strings.
+ */
+function formatQueryRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(row)) {
+    out[key] = formatQueryValue(row[key])
+  }
+  return out
+}
+
 function sanitizeSheetName(name: string): string {
   const forbidden = ['\\', '/', '*', '?', ':', '[', ']']
   let out = name
@@ -1026,53 +1076,161 @@ interface PreservedSheet {
 }
 
 /**
- * Best-effort hard cap on the existing-file size we'll attempt to load
- * in-memory to extract user-added sheets. ExcelJS' `readFile` mmaps the
- * whole workbook so very large files (80 MB+) blow the V8 heap. Above this
- * cap we skip preservation and fall back to a fresh streaming write — the
- * user will see a warning in the run summary that custom sheets weren't
- * preserved.
+ * Preserving user-added sheets (formulas, styling, charts, merged cells,
+ * named ranges, …) requires loading the existing workbook with ExcelJS,
+ * which holds it entirely in the V8 heap. We deliberately do NOT cap the
+ * file size here — the user's explicit requirement is "preserve other
+ * sheets no matter what the file size". If `readFile` runs out of memory
+ * or fails to parse, `writeInPlaceExcelReplace` returns `null` and the
+ * caller falls back to the streaming writer (which produces a clean
+ * workbook so the run never fails outright).
+ *
+ * To handle very large workbooks reliably, the Electron main process is
+ * launched with `--max-old-space-size` raised in the app entry point.
  */
-const PRESERVE_SHEETS_MAX_BYTES = 30 * 1024 * 1024
 
-async function extractPreservedSheets(
+/**
+ * Replace-mode writer that opens the existing destination workbook
+ * IN-MEMORY, removes only the sheets this job owns (bucket sheets + the
+ * old "Summary"), then writes the new bucket sheets and a fresh Summary
+ * back into the SAME workbook before saving.
+ *
+ * This is the path users want for files that already contain manually
+ * curated sheets — e.g. a "Report" tab with formulas, conditional
+ * formatting, charts, named ranges, merged cells, pivot caches, etc.
+ * Because we modify the existing workbook object rather than rebuilding
+ * it from cell values, every untouched sheet is preserved BIT-EXACT.
+ *
+ * When the destination file already exists, it is loaded and only the
+ * sheets owned by this job (per-connection bucket sheets + the previous
+ * "Summary") are removed/recreated. When it does NOT exist, a fresh
+ * workbook is created, the bucket sheets + Summary are added to it, and
+ * it is saved at `filePath` — no preservation work is needed in that
+ * case because there are no other sheets to keep.
+ *
+ * Returns the destination path on success, or `null` if an EXISTING
+ * workbook couldn't be opened (corrupt / locked / OOM). The caller falls
+ * back to the streaming writer in that case so the run still produces
+ * output. A non-existent destination never triggers the fallback.
+ */
+async function writeInPlaceExcelReplace(
   filePath: string,
-  patterns: { exactNames: Set<string>; basePrefixes: string[] }
-): Promise<PreservedSheet[] | null> {
-  try {
-    if (!fs.existsSync(filePath)) return []
-    const stat = await fs.promises.stat(filePath)
-    if (stat.size > PRESERVE_SHEETS_MAX_BYTES) {
-      // Existing file too large to safely parse in memory — skip preservation.
+  jobName: string,
+  progress: JobProgress,
+  connections: ConnectionRow[],
+  allChunkFiles: Map<string, string[]>,
+  queryNames: string[] = [],
+  allBucketMeta: Map<string, BucketMeta> = new Map()
+): Promise<string | null> {
+  const workbook = new ExcelJS.Workbook()
+  const fileExists = fs.existsSync(filePath)
+  if (fileExists) {
+    try {
+      await workbook.xlsx.readFile(filePath)
+    } catch {
+      // Couldn't open existing file — let the caller fall back.
       return null
     }
-    const wb = new ExcelJS.Workbook()
-    await wb.xlsx.readFile(filePath)
-    const out: PreservedSheet[] = []
-    wb.eachSheet((sheet) => {
-      if (isBucketSheetName(sheet.name, patterns)) return
-      const rows: ExcelJS.CellValue[][] = []
-      const widths: Array<number | undefined> = []
-      const cols = sheet.columns ?? []
-      for (const c of cols) widths.push(c?.width)
-      sheet.eachRow({ includeEmpty: true }, (row) => {
-        const values = row.values
-        // ExcelJS row.values is 1-indexed (index 0 is undefined). Slice off
-        // the leading hole so the array matches the column order.
-        if (Array.isArray(values)) {
-          rows.push(values.slice(1) as ExcelJS.CellValue[])
-        } else {
-          rows.push([])
-        }
-      })
-      out.push({ name: sheet.name, rows, columnWidths: widths })
-    })
-    return out
-  } catch {
-    // Corrupt/unsupported workbook — skip preservation rather than failing
-    // the whole run. Fresh streaming write proceeds without the user sheets.
-    return null
   }
+  // When the file doesn't exist we just keep the fresh empty `workbook`
+  // and fall straight through to the bucket-sheet writer below, which
+  // adds the new sheets and saves to `filePath`.
+
+  const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
+  const patterns = bucketSheetNamePatterns(buckets)
+
+  // Remove ONLY the sheets this job owns: previous bucket sheets (incl.
+  // their `_partN` rollovers from a prior run) and the old "Summary".
+  // EVERY OTHER SHEET — user-added Reports, formula tabs, charts, pivots,
+  // etc. — is left untouched so it round-trips through the save unchanged.
+  const sheetsToRemove: number[] = []
+  workbook.eachSheet((ws) => {
+    if (isBucketSheetName(ws.name, patterns)) sheetsToRemove.push(ws.id)
+  })
+  for (const id of sheetsToRemove) {
+    const ws = workbook.getWorksheet(id)
+    if (ws) workbook.removeWorksheet(ws.id)
+  }
+
+  const threshold = resolveSheetRowThreshold()
+  const taken = new Set<string>()
+  for (const ws of workbook.worksheets) taken.add(ws.name.toLowerCase())
+  taken.add('summary')
+
+  for (const bucket of buckets) {
+    const baseSheetName = sanitizeSheetName(bucket.label)
+    const willSplit = bucket.rows > threshold
+    const name = nextRolloverSheetName(baseSheetName, 0, taken, willSplit)
+    let sheet = workbook.addWorksheet(name)
+    let rolloverIndex = 0
+
+    let headers: string[] = []
+    let headersSet = false
+    let rowsInSheet = 0
+
+    // Empty bucket — emit header (and an error row when applicable) so
+    // users still get a per-bucket diagnostic artefact.
+    if (bucket.chunkFiles.length === 0) {
+      if (bucket.columns.length > 0) {
+        headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
+        sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+      } else if (bucket.error) {
+        headers = ['Error']
+        sheet.columns = [{ header: 'Error', key: 'Error', width: 60 }]
+      } else {
+        headers = ['No rows found']
+        sheet.columns = [{ header: 'No rows found', key: 'msg', width: 30 }]
+      }
+      if (bucket.error) {
+        const cells: Record<string, unknown> = {}
+        if (bucket.columns.length > 0) {
+          for (const c of bucket.columns) cells[c] = ''
+          cells['Error'] = bucket.error
+        } else {
+          cells['Error'] = bucket.error
+        }
+        sheet.addRow(cells)
+      } else if (!bucket.columns.length) {
+        sheet.addRow({ msg: 'No rows found' })
+      }
+      continue
+    }
+
+    for (const chunkFile of bucket.chunkFiles) {
+      await streamChunkRows(chunkFile, (row) => {
+        const fmtRow = formatQueryRow(row)
+        if (!headersSet) {
+          headers = Object.keys(fmtRow)
+          sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+          headersSet = true
+          rowsInSheet = 1
+        }
+        if (rowsInSheet >= threshold) {
+          rolloverIndex++
+          const nextName = nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
+          sheet = workbook.addWorksheet(nextName)
+          sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+          rowsInSheet = 1
+        }
+        sheet.addRow(fmtRow)
+        rowsInSheet++
+      })
+    }
+  }
+
+  writeSummarySheet(workbook, jobName, progress, connections, queryNames, allBucketMeta)
+
+  let fileDir = path.dirname(filePath)
+  try {
+    if (!fs.existsSync(fileDir)) await fs.promises.mkdir(fileDir, { recursive: true })
+  } catch {
+    fileDir = appDesktopBaseDir()
+    await fs.promises.mkdir(fileDir, { recursive: true })
+    filePath = path.join(fileDir, path.basename(filePath))
+  }
+
+  await workbook.xlsx.writeFile(filePath)
+  return filePath
 }
 
 async function writeStreamingExcel(
@@ -1125,25 +1283,46 @@ async function writeStreamingExcel(
   // whether the destination file already exists or whether a template was
   // provided — the template's previous contents are intentionally discarded.
   if (effectiveOp === 'replace') {
-    // Preserve user-added sheets (e.g. a manually maintained "Report" tab)
-    // by extracting them BEFORE we delete the destination. Only sheets that
-    // don't correspond to a bucket label are kept; the writer will rewrite
-    // bucket sheets with this run's data and re-emit the preserved ones.
-    const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
-    const patterns = bucketSheetNamePatterns(buckets)
-    let preservedSheets: PreservedSheet[] = []
-    if (fs.existsSync(filePath)) {
-      const extracted = await extractPreservedSheets(filePath, patterns)
-      if (extracted) preservedSheets = extracted
-      // If extracted === null the existing file was too big or unreadable —
-      // we proceed without preservation to avoid OOM.
+    // Replace mode: keep ALL user-added sheets (Reports, formula tabs,
+    // charts, pivots, named ranges …) intact. We only rewrite the sheets
+    // this job owns — the per-connection bucket sheets and the Summary.
+    //
+    // Strategy (single, uniform path):
+    //   • The in-place helper handles BOTH cases:
+    //       1. File exists → load it with ExcelJS, remove only bucket +
+    //          Summary sheets, write the new bucket + Summary sheets back
+    //          into the SAME workbook, save. Every other sheet round-trips
+    //          bit-exact (formulas, conditional formatting, merged cells,
+    //          charts, named ranges, …).
+    //       2. File does NOT exist → start with a fresh workbook, add the
+    //          bucket sheets + Summary, save at `filePath`. There are no
+    //          user sheets to preserve in this case, so nothing is lost.
+    //   • Only when an EXISTING workbook can't be opened (corrupt / locked
+    //     / OOM) does the helper return `null` and we fall back to the
+    //     streaming writer, guaranteeing the run still produces output.
+    const written = await writeInPlaceExcelReplace(
+      filePath,
+      jobName,
+      progress,
+      connections,
+      allChunkFiles,
+      queryNames,
+      allBucketMeta
+    )
+    if (written) return written
 
-      try {
-        await fs.promises.unlink(filePath)
-      } catch {
-        // Best-effort: if we can't delete (e.g. file locked), the writer
-        // below will overwrite via its create-truncate semantics anyway.
-      }
+    // In-place load failed for an existing file. Surface a warning so
+    // the user knows manually-added sheets in that file weren't carried
+    // over by this fallback path, then write a fresh workbook via the
+    // streaming writer.
+    progress.error =
+      progress.error ??
+      'Could not open destination workbook to preserve user-added sheets — wrote a fresh workbook'
+    try {
+      if (fs.existsSync(filePath)) await fs.promises.unlink(filePath)
+    } catch {
+      // Best-effort: if we can't delete (e.g. file locked), the writer
+      // below will overwrite via its create-truncate semantics anyway.
     }
     return await writeStreamingExcelReplace(
       filePath,
@@ -1152,8 +1331,7 @@ async function writeStreamingExcel(
       connections,
       allChunkFiles,
       queryNames,
-      allBucketMeta,
-      preservedSheets
+      allBucketMeta
     )
   }
 
@@ -1283,8 +1461,9 @@ async function writeStreamingExcel(
     for (const chunkFile of bucket.chunkFiles) {
       let firstRowSeen = false
       await streamChunkRows(chunkFile, (row) => {
+        const fmtRow = formatQueryRow(row)
         if (!headersSet) {
-          headers = Object.keys(row)
+          headers = Object.keys(fmtRow)
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
           headersSet = true
           rowsInSheet = 1
@@ -1297,7 +1476,7 @@ async function writeStreamingExcel(
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
           rowsInSheet = 1
         }
-        sheet.addRow(row)
+        sheet.addRow(fmtRow)
         rowsInSheet++
       })
       // Empty chunk files are skipped silently to keep the sheet clean.
@@ -1412,7 +1591,7 @@ async function writeStreamingExcelReplace(
             )
             writeHeader()
           }
-          const values = headers.map((key) => row[key] as ExcelJS.CellValue)
+          const values = headers.map((key) => formatQueryValue(row[key]) as ExcelJS.CellValue)
           sheet.addRow(values).commit()
           rowsInSheet++
         })
