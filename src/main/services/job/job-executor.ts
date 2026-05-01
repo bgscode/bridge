@@ -1160,214 +1160,213 @@ async function writeStreamingExcelReplace(
   })
 
   try {
+    const threshold = resolveSheetRowThreshold()
+    const taken = new Set<string>()
+    taken.add('summary')
 
-  const threshold = resolveSheetRowThreshold()
-  const taken = new Set<string>()
-  taken.add('summary')
+    const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
+    for (const bucket of buckets) {
+      if (isCancelled()) throw new JobCancelledError()
+      const baseSheetName = sanitizeSheetName(bucket.label)
+      const willSplit = bucket.rows > threshold
+      let rolloverIndex = 0
+      let sheet = workbook.addWorksheet(nextRolloverSheetName(baseSheetName, 0, taken, willSplit))
 
-  const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
-  for (const bucket of buckets) {
-    if (isCancelled()) throw new JobCancelledError()
-    const baseSheetName = sanitizeSheetName(bucket.label)
-    const willSplit = bucket.rows > threshold
-    let rolloverIndex = 0
-    let sheet = workbook.addWorksheet(nextRolloverSheetName(baseSheetName, 0, taken, willSplit))
+      let headers: string[] = []
+      let hasHeader = false
+      let rowsInSheet = 0
 
-    let headers: string[] = []
-    let hasHeader = false
-    let rowsInSheet = 0
-
-    const writeHeader = (): void => {
-      const hr = sheet.addRow(headers)
-      hr.font = { bold: true, color: { argb: 'FFFFFFFF' } }
-      hr.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0EA5E9' } }
-      hr.commit()
-      rowsInSheet = 1
-    }
-
-    // Empty bucket — emit header + (optional) error row and move on.
-    if (bucket.chunkFiles.length === 0) {
-      if (bucket.columns.length > 0) {
-        headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
-      } else if (bucket.error) {
-        headers = ['Error']
-      } else {
-        headers = ['No rows found']
+      const writeHeader = (): void => {
+        const hr = sheet.addRow(headers)
+        hr.font = { bold: true, color: { argb: 'FFFFFFFF' } }
+        hr.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0EA5E9' } }
+        hr.commit()
+        rowsInSheet = 1
       }
-      writeHeader()
-      if (bucket.error) {
-        const cells = headers.map((h) => (h === 'Error' ? bucket.error : ''))
-        sheet.addRow(cells).commit()
-      } else if (!bucket.columns.length) {
-        sheet.addRow(['No rows found']).commit()
+
+      // Empty bucket — emit header + (optional) error row and move on.
+      if (bucket.chunkFiles.length === 0) {
+        if (bucket.columns.length > 0) {
+          headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
+        } else if (bucket.error) {
+          headers = ['Error']
+        } else {
+          headers = ['No rows found']
+        }
+        writeHeader()
+        if (bucket.error) {
+          const cells = headers.map((h) => (h === 'Error' ? bucket.error : ''))
+          sheet.addRow(cells).commit()
+        } else if (!bucket.columns.length) {
+          sheet.addRow(['No rows found']).commit()
+        }
+        sheet.commit()
+        continue
       }
-      sheet.commit()
-      continue
-    }
 
-    for (const chunkFile of bucket.chunkFiles) {
-      await streamChunkRows(chunkFile, (row) => {
-        if (isCancelled()) throw new JobCancelledError()
-        if (!hasHeader) {
-          headers = Object.keys(row)
-          writeHeader()
-          hasHeader = true
-        }
-        if (rowsInSheet >= threshold) {
-          sheet.commit()
-          rolloverIndex++
-          sheet = workbook.addWorksheet(
-            nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
-          )
-          writeHeader()
-        }
-        const values = headers.map((key) => row[key] as ExcelJS.CellValue)
-        sheet.addRow(values).commit()
-        rowsInSheet++
-      })
-    }
-
-    sheet.commit()
-  }
-
-  const summary = workbook.addWorksheet('Summary')
-  const startedAt = progress.started_at
-  const finishedAt = progress.finished_at ?? new Date().toISOString()
-  const durationSeconds = Math.max(
-    0,
-    Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1000)
-  )
-  const successCount = progress.total_connections - progress.failed_connections
-  const errorRate =
-    progress.total_connections > 0
-      ? Math.round((progress.failed_connections / progress.total_connections) * 100)
-      : 0
-
-  // Build label map for Sheet Name column (single-query mode only)
-  const isMultiQueryReplace = queryNames.length > 0
-  const connLabelMapReplace = new Map<number, string>()
-  for (const c of connections) {
-    connLabelMapReplace.set(c.id, resolveConnectionLabel(c))
-  }
-
-  const summaryHeaders = [
-    'Connection',
-    'Sheet Name',
-    'Status',
-    'Rows',
-    'Started At',
-    'Finished At',
-    'Duration (s)',
-    'Error Category',
-    'Failure Reason'
-  ]
-  const summaryHeaderRow = summary.addRow(summaryHeaders)
-  summaryHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } }
-  summaryHeaderRow.fill = {
-    type: 'pattern',
-    pattern: 'solid',
-    fgColor: { argb: 'FF0F766E' }
-  }
-  summaryHeaderRow.commit()
-
-  summary
-    .addRow([
-      `Job: ${jobName}`,
-      '',
-      progress.status,
-      progress.total_rows,
-      formatUtcToIst(startedAt),
-      formatUtcToIst(finishedAt),
-      durationSeconds,
-      categorizeError(progress.error),
-      progress.error ?? ''
-    ])
-    .commit()
-
-  summary
-    .addRow([
-      `Summary: ${successCount}/${progress.total_connections} successful`,
-      '',
-      progress.failed_connections > 0 ? 'partial' : 'ok',
-      progress.total_rows,
-      '',
-      '',
-      '',
-      `${errorRate}% Error Rate`,
-      progress.failed_connections > 0 ? `${progress.failed_connections} connection(s) failed` : ''
-    ])
-    .commit()
-
-  summary.addRow([]).commit()
-
-  for (const conn of progress.connections) {
-    const connDuration =
-      conn.started_at && conn.finished_at
-        ? Math.max(
-            0,
-            Math.round(
-              (new Date(conn.finished_at).getTime() - new Date(conn.started_at).getTime()) / 1000
+      for (const chunkFile of bucket.chunkFiles) {
+        await streamChunkRows(chunkFile, (row) => {
+          if (isCancelled()) throw new JobCancelledError()
+          if (!hasHeader) {
+            headers = Object.keys(row)
+            writeHeader()
+            hasHeader = true
+          }
+          if (rowsInSheet >= threshold) {
+            sheet.commit()
+            rolloverIndex++
+            sheet = workbook.addWorksheet(
+              nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
             )
-          )
+            writeHeader()
+          }
+          const values = headers.map((key) => row[key] as ExcelJS.CellValue)
+          sheet.addRow(values).commit()
+          rowsInSheet++
+        })
+      }
+
+      sheet.commit()
+    }
+
+    const summary = workbook.addWorksheet('Summary')
+    const startedAt = progress.started_at
+    const finishedAt = progress.finished_at ?? new Date().toISOString()
+    const durationSeconds = Math.max(
+      0,
+      Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1000)
+    )
+    const successCount = progress.total_connections - progress.failed_connections
+    const errorRate =
+      progress.total_connections > 0
+        ? Math.round((progress.failed_connections / progress.total_connections) * 100)
         : 0
 
-    const sheetLabelReplace = connLabelMapReplace.get(conn.connection_id) ?? conn.connection_name
+    // Build label map for Sheet Name column (single-query mode only)
+    const isMultiQueryReplace = queryNames.length > 0
+    const connLabelMapReplace = new Map<number, string>()
+    for (const c of connections) {
+      connLabelMapReplace.set(c.id, resolveConnectionLabel(c))
+    }
 
-    if (isMultiQueryReplace) {
-      // Connection-level aggregate row (Sheet Name blank for parent row).
-      summary
-        .addRow([
-          conn.connection_name,
-          '',
-          conn.status,
-          conn.rows,
-          formatUtcToIst(conn.started_at),
-          formatUtcToIst(conn.finished_at),
-          connDuration,
-          categorizeError(conn.error),
-          conn.error ?? ''
-        ])
-        .commit()
-      const connRow = connections.find((c) => c.id === conn.connection_id)
-      for (let qi = 0; qi < queryNames.length; qi++) {
-        const tag = `c${conn.connection_id}-q${qi}`
-        const meta = allBucketMeta.get(tag)
-        const qLabel = queryNames[qi]?.trim() || `Query ${qi + 1}`
-        const querySheetLabel = sanitizeSheetName(chunkSheetLabel(connRow, qi, queryNames))
+    const summaryHeaders = [
+      'Connection',
+      'Sheet Name',
+      'Status',
+      'Rows',
+      'Started At',
+      'Finished At',
+      'Duration (s)',
+      'Error Category',
+      'Failure Reason'
+    ]
+    const summaryHeaderRow = summary.addRow(summaryHeaders)
+    summaryHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } }
+    summaryHeaderRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0F766E' }
+    }
+    summaryHeaderRow.commit()
+
+    summary
+      .addRow([
+        `Job: ${jobName}`,
+        '',
+        progress.status,
+        progress.total_rows,
+        formatUtcToIst(startedAt),
+        formatUtcToIst(finishedAt),
+        durationSeconds,
+        categorizeError(progress.error),
+        progress.error ?? ''
+      ])
+      .commit()
+
+    summary
+      .addRow([
+        `Summary: ${successCount}/${progress.total_connections} successful`,
+        '',
+        progress.failed_connections > 0 ? 'partial' : 'ok',
+        progress.total_rows,
+        '',
+        '',
+        '',
+        `${errorRate}% Error Rate`,
+        progress.failed_connections > 0 ? `${progress.failed_connections} connection(s) failed` : ''
+      ])
+      .commit()
+
+    summary.addRow([]).commit()
+
+    for (const conn of progress.connections) {
+      const connDuration =
+        conn.started_at && conn.finished_at
+          ? Math.max(
+              0,
+              Math.round(
+                (new Date(conn.finished_at).getTime() - new Date(conn.started_at).getTime()) / 1000
+              )
+            )
+          : 0
+
+      const sheetLabelReplace = connLabelMapReplace.get(conn.connection_id) ?? conn.connection_name
+
+      if (isMultiQueryReplace) {
+        // Connection-level aggregate row (Sheet Name blank for parent row).
         summary
           .addRow([
-            `  ↳ ${qLabel}`,
-            querySheetLabel,
-            meta?.error ? 'error' : meta !== undefined ? 'done' : '',
-            meta?.error ? 0 : (meta?.rows ?? 0),
+            conn.connection_name,
             '',
-            '',
-            '',
-            meta?.error ? categorizeError(meta.error) : '',
-            meta?.error ?? ''
+            conn.status,
+            conn.rows,
+            formatUtcToIst(conn.started_at),
+            formatUtcToIst(conn.finished_at),
+            connDuration,
+            categorizeError(conn.error),
+            conn.error ?? ''
+          ])
+          .commit()
+        const connRow = connections.find((c) => c.id === conn.connection_id)
+        for (let qi = 0; qi < queryNames.length; qi++) {
+          const tag = `c${conn.connection_id}-q${qi}`
+          const meta = allBucketMeta.get(tag)
+          const qLabel = queryNames[qi]?.trim() || `Query ${qi + 1}`
+          const querySheetLabel = sanitizeSheetName(chunkSheetLabel(connRow, qi, queryNames))
+          summary
+            .addRow([
+              `  ↳ ${qLabel}`,
+              querySheetLabel,
+              meta?.error ? 'error' : meta !== undefined ? 'done' : '',
+              meta?.error ? 0 : (meta?.rows ?? 0),
+              '',
+              '',
+              '',
+              meta?.error ? categorizeError(meta.error) : '',
+              meta?.error ?? ''
+            ])
+            .commit()
+        }
+      } else {
+        summary
+          .addRow([
+            conn.connection_name,
+            sheetLabelReplace,
+            conn.status,
+            conn.rows,
+            formatUtcToIst(conn.started_at),
+            formatUtcToIst(conn.finished_at),
+            connDuration,
+            categorizeError(conn.error),
+            conn.error ?? ''
           ])
           .commit()
       }
-    } else {
-      summary
-        .addRow([
-          conn.connection_name,
-          sheetLabelReplace,
-          conn.status,
-          conn.rows,
-          formatUtcToIst(conn.started_at),
-          formatUtcToIst(conn.finished_at),
-          connDuration,
-          categorizeError(conn.error),
-          conn.error ?? ''
-        ])
-        .commit()
     }
-  }
 
-  summary.commit()
-  await workbook.commit()
-  return filePath
+    summary.commit()
+    await workbook.commit()
+    return filePath
   } catch (err) {
     // Streaming WorkbookWriter has been appending to disk as we go, so any
     // failure (including user cancellation) leaves a partial .xlsx behind.
@@ -1996,7 +1995,8 @@ export async function runJob(
   let effectiveDestinationConfig: string | null = job.destination_config
   if (isExcelDestination) {
     const cfg = typeof effectiveDestinationConfig === 'string' ? effectiveDestinationConfig : ''
-    const cfgValid = cfg.trim().length > 0 && (fs.existsSync(cfg) || fs.existsSync(path.dirname(cfg)))
+    const cfgValid =
+      cfg.trim().length > 0 && (fs.existsSync(cfg) || fs.existsSync(path.dirname(cfg)))
     if (!cfgValid) {
       const fallback = appDesktopBaseDir()
       try {
@@ -2098,7 +2098,7 @@ export async function runJob(
   void createDirectCsvContext
   void finalizeDirectCsvOutput
   void writeStreamingCsv
-  const directCsvContext: DirectCsvContext | null = null  // ── Adaptive Brain wiring ───────────────────────────────────────────────
+  const directCsvContext: DirectCsvContext | null = null // ── Adaptive Brain wiring ───────────────────────────────────────────────
   const brain = getAdaptiveBrain()
   brain.start()
 
@@ -2391,7 +2391,7 @@ export async function runJob(
 
   // ── Write output ─────────────────────────────────────────────────────────
   const successfulConnections = progress.completed_connections - progress.failed_connections
-  let directCsvFinalized = false
+  const directCsvFinalized = false
 
   // Emit output as long as we have any artefact to record. This includes the
   // all-failed case so users still get a header + error row file per
