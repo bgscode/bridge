@@ -80,7 +80,7 @@ export function SiteHeader(): JSX.Element {
             <div className="flex items-center justify-center rounded-lg bg-black text-white p-1.5">
               <CommandIcon className="size-4" />
             </div>
-            <span className="text-sm font-semibold ml-2">Bridge Inc.</span>
+            <span className="text-sm font-semibold ml-2">Alam</span>
           </Button>
         </div>
 

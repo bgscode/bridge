@@ -59,7 +59,7 @@ export default function LoginPage(): React.JSX.Element {
           <div className="flex size-10 items-center justify-center rounded-lg bg-black text-white p-2">
             <CommandIcon className="size-6" />
           </div>
-          <h1 className="text-xl font-semibold">Bridge Inc.</h1>
+          <h1 className="text-xl font-semibold">Alam</h1>
           <p className="text-sm text-muted-foreground">
             {mode === 'bootstrap' ? 'Create the first admin account' : 'Sign in to continue'}
           </p>
