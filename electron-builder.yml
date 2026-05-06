@@ -43,8 +43,6 @@ linux:
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-extraArgs:
-  - --js-flags=--max-old-space-size=8192
 publish:
   provider: generic
   url: https://example.com/auto-updates
