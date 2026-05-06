@@ -13,6 +13,9 @@ interface RawJobRow extends Omit<
   | 'sql_query_names'
   | 'is_multi'
   | 'online_only'
+  | 'modify_dates'
+  | 'summary_extra_columns'
+  | 'excel_combine_sheets'
   | 'last_failed_connection_ids'
 > {
   connection_ids: string
@@ -20,7 +23,10 @@ interface RawJobRow extends Omit<
   sql_query_names: string
   is_multi: number
   online_only: number
+  modify_dates: number
   last_failed_connection_ids: string | null
+  summary_extra_columns: string | null
+  excel_combine_sheets: number
 }
 
 function parseRow(raw: RawJobRow): JobRow {
@@ -31,7 +37,10 @@ function parseRow(raw: RawJobRow): JobRow {
     sql_query_names: JSON.parse(raw.sql_query_names || '[]'),
     is_multi: Boolean(raw.is_multi),
     online_only: Boolean(raw.online_only),
-    last_failed_connection_ids: JSON.parse(raw.last_failed_connection_ids || '[]')
+    modify_dates: raw.modify_dates === undefined ? true : Boolean(raw.modify_dates),
+    last_failed_connection_ids: JSON.parse(raw.last_failed_connection_ids || '[]'),
+    summary_extra_columns: raw.summary_extra_columns ? JSON.parse(raw.summary_extra_columns) : null,
+    excel_combine_sheets: Boolean(raw.excel_combine_sheets)
   }
 }
 
@@ -43,6 +52,7 @@ function serializeForInsert(data: CreateJobDto): Record<string, unknown> {
     connection_ids: JSON.stringify(data.connection_ids ?? []),
     online_only: data.online_only ? 1 : 0,
     is_multi: data.is_multi ? 1 : 0,
+    modify_dates: data.modify_dates === false ? 0 : 1,
     type: data.type,
     sql_query: JSON.stringify(data.sql_query ?? []),
     sql_query_names: JSON.stringify(data.sql_query_names ?? []),
@@ -52,7 +62,12 @@ function serializeForInsert(data: CreateJobDto): Record<string, unknown> {
     notify_webhook: data.notify_webhook ?? null,
     template_path: data.template_path ?? null,
     template_mode: data.template_mode ?? null,
-    schedule: data.schedule ?? null
+    schedule: data.schedule ?? null,
+    summary_extra_columns:
+      Array.isArray(data.summary_extra_columns) && data.summary_extra_columns.length > 0
+        ? JSON.stringify(data.summary_extra_columns)
+        : null,
+    excel_combine_sheets: data.excel_combine_sheets ? 1 : 0
   }
 }
 
@@ -64,6 +79,7 @@ const KNOWN_COLUMNS = new Set([
   'connection_ids',
   'online_only',
   'is_multi',
+  'modify_dates',
   'type',
   'sql_query',
   'sql_query_names',
@@ -77,7 +93,9 @@ const KNOWN_COLUMNS = new Set([
   'status',
   'last_run_at',
   'last_error',
-  'last_failed_connection_ids'
+  'last_failed_connection_ids',
+  'summary_extra_columns',
+  'excel_combine_sheets'
 ])
 
 function serializeForUpdate(data: Record<string, unknown>): Record<string, unknown> {
@@ -89,7 +107,15 @@ function serializeForUpdate(data: Record<string, unknown>): Record<string, unkno
       out[key] = JSON.stringify(value ?? [])
     } else if (key === 'sql_query' || key === 'sql_query_names') {
       out[key] = JSON.stringify(value)
-    } else if (key === 'is_multi' || key === 'online_only') {
+    } else if (key === 'summary_extra_columns') {
+      out[key] =
+        Array.isArray(value) && (value as unknown[]).length > 0 ? JSON.stringify(value) : null
+    } else if (
+      key === 'is_multi' ||
+      key === 'online_only' ||
+      key === 'modify_dates' ||
+      key === 'excel_combine_sheets'
+    ) {
       out[key] = value ? 1 : 0
     } else {
       out[key] = value ?? null
@@ -115,7 +141,7 @@ export const jobRepository = {
     const serialized = serializeForInsert(data)
     const result = db
       .prepare(
-        'INSERT INTO jobs (name, description, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule) VALUES (@name, @description, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule)'
+        'INSERT INTO jobs (name, description, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, excel_combine_sheets) VALUES (@name, @description, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @excel_combine_sheets)'
       )
       .run(serialized)
     return this.findById(result.lastInsertRowid as number)!
@@ -123,7 +149,7 @@ export const jobRepository = {
 
   bulkCreate(data: CreateJobDto[]): JobRow[] {
     const stmt = db.prepare(
-      'INSERT INTO jobs (name, description, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule) VALUES (@name, @description, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule)'
+      'INSERT INTO jobs (name, description, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, excel_combine_sheets) VALUES (@name, @description, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @excel_combine_sheets)'
     )
     const insertMany = db.transaction((jobs: CreateJobDto[]) => {
       const rows: JobRow[] = []

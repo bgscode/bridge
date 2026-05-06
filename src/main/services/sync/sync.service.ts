@@ -10,7 +10,7 @@
  */
 import db from '../../db/index'
 
-const API_BASE = process.env.BRIDGE_API_URL ?? 'https://link.yonolight.com/api'
+const API_BASE = process.env.BRIDGE_API_URL as string
 
 export type SyncResult = {
   pushed: {
@@ -20,6 +20,7 @@ export type SyncResult = {
     jobGroups: number
     connections: number
     jobs: number
+    jobVariables: number
     settings: number
   }
   pulled: {
@@ -29,6 +30,7 @@ export type SyncResult = {
     jobGroups: number
     connections: number
     jobs: number
+    jobVariables: number
     settings: number
   }
 }
@@ -80,7 +82,19 @@ function collectLocal() {
   const settings = db.prepare('SELECT key, value FROM settings').all() as Row[]
   const connections = db.prepare('SELECT * FROM connections').all() as Row[]
   const jobs = db.prepare('SELECT * FROM jobs').all() as Row[]
-  return { stores, fiscalYears, groups, jobGroups, settings, connections, jobs }
+  const jobVariables = db.prepare('SELECT * FROM job_variables').all() as Row[]
+  const jobVariableValues = db.prepare('SELECT * FROM job_variable_values').all() as Row[]
+  return {
+    stores,
+    fiscalYears,
+    groups,
+    jobGroups,
+    settings,
+    connections,
+    jobs,
+    jobVariables,
+    jobVariableValues
+  }
 }
 
 function localIdByRemoteId(table: string): Map<string, number> {
@@ -118,6 +132,11 @@ async function pushAll(token: string) {
   )
   const connRemote = Object.fromEntries(
     (local.connections as { id: number; remote_id: string | null }[])
+      .filter((r) => r.remote_id)
+      .map((r) => [r.id, r.remote_id as string])
+  )
+  const jobRemote = Object.fromEntries(
+    (local.jobs as { id: number; remote_id: string | null }[])
       .filter((r) => r.remote_id)
       .map((r) => [r.id, r.remote_id as string])
   )
@@ -211,9 +230,38 @@ async function pushAll(token: string) {
         template_path: (r.template_path as string | null) ?? null,
         template_mode: (r.template_mode as 'new' | 'existing' | null) ?? null,
         schedule: (r.schedule as string | null) ?? null,
-        status: (r.status as 'idle' | 'running' | 'success' | 'failed') ?? 'idle'
+        status: (r.status as 'idle' | 'running' | 'success' | 'failed') ?? 'idle',
+        modify_dates: Boolean(r.modify_dates),
+        summary_extra_columns: (() => {
+          try {
+            return JSON.parse((r.summary_extra_columns as string) ?? 'null') as string[] | null
+          } catch {
+            return null
+          }
+        })(),
+        excel_combine_sheets: Boolean(r.excel_combine_sheets)
       }
-    })
+    }),
+    jobVariables: local.jobVariables.map((v) => ({
+      localId: v.id as number,
+      remoteId: (v.remote_id as string | null) ?? undefined,
+      jobLocalId: (v.job_id as number | null) ?? null,
+      jobRemoteId: v.job_id ? jobRemote[v.job_id as number] : undefined,
+      name: String(v.name),
+      description: (v.description as string | null) ?? null,
+      defaultValue: (v.default_value as string | null) ?? null,
+      autoUpdate: Boolean(v.auto_update),
+      sourceColumn: (v.source_column as string | null) ?? null,
+      updateFn: (v.update_fn as 'max' | 'min' | 'last') ?? 'max',
+      values: local.jobVariableValues
+        .filter((val) => val.job_variable_id === v.id)
+        .map((val) => ({
+          connectionLocalId: val.connection_id as number,
+          connectionRemoteId: connRemote[val.connection_id as number] ?? undefined,
+          value: (val.value as string | null) ?? null,
+          lastRunAt: (val.last_run_at as string | null) ?? null
+        }))
+    }))
   }
 
   type PushResponse = {
@@ -223,12 +271,14 @@ async function pushAll(token: string) {
     jobGroups: Record<number, string>
     connections: Record<number, string>
     jobs: Record<number, string>
+    jobVariables?: Record<number, string>
   }
 
   const maps = await post<PushResponse>('/sync/push', token, payload)
 
   // Persist returned remote_ids
-  const applyMap = (table: string, map: Record<number, string>) => {
+  const applyMap = (table: string, map: Record<number, string> | undefined) => {
+    if (!map) return
     const stmt = db.prepare(`UPDATE ${table} SET remote_id = ? WHERE id = ?`)
     const tx = db.transaction((entries: [number, string][]) => {
       for (const [id, rid] of entries) stmt.run(rid, id)
@@ -241,6 +291,7 @@ async function pushAll(token: string) {
   applyMap('job_groups', maps.jobGroups)
   applyMap('connections', maps.connections)
   applyMap('jobs', maps.jobs)
+  applyMap('job_variables', maps.jobVariables)
 
   return {
     stores: Object.keys(maps.stores).length,
@@ -249,6 +300,7 @@ async function pushAll(token: string) {
     jobGroups: Object.keys(maps.jobGroups).length,
     connections: Object.keys(maps.connections).length,
     jobs: Object.keys(maps.jobs).length,
+    jobVariables: Object.keys(maps.jobVariables ?? {}).length,
     settings: payload.settings.length
   }
 }
@@ -296,6 +348,23 @@ type RemoteJob = RemoteBase & {
   status: string
   lastRunAt: string | null
   lastError: string | null
+  modifyDates: boolean | null
+  summaryExtraColumns: string[] | null
+  excelCombineSheets: boolean | null
+}
+type RemoteJobVariable = RemoteBase & {
+  jobId: string
+  name: string
+  description: string | null
+  defaultValue: string | null
+  autoUpdate: boolean
+  sourceColumn: string | null
+  updateFn: 'max' | 'min' | 'last'
+  values: Array<{
+    connectionId: string
+    value: string | null
+    lastRunAt: string | null
+  }>
 }
 type PullData = {
   stores: RemoteStore[]
@@ -305,6 +374,7 @@ type PullData = {
   settings: RemoteSetting[]
   connections: RemoteConnection[]
   jobs: RemoteJob[]
+  jobVariables?: RemoteJobVariable[]
 }
 
 async function pullAll(token: string): Promise<SyncResult['pulled']> {
@@ -328,6 +398,8 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
   // Server is master: wipe local state and rebuild from server snapshot.
   // Order matters — jobs → connections → catalog (no FK violations).
   const wipe = db.transaction(() => {
+    db.prepare('DELETE FROM job_variable_values').run()
+    db.prepare('DELETE FROM job_variables').run()
     db.prepare('DELETE FROM jobs').run()
     db.prepare('DELETE FROM connections').run()
     db.prepare('DELETE FROM stores').run()
@@ -455,11 +527,13 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
     INSERT INTO jobs (
       name, description, job_group_id, connection_ids, online_only, is_multi,
       type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook,
-      template_path, template_mode, schedule, status, last_run_at, last_error, remote_id
+      template_path, template_mode, schedule, status, last_run_at, last_error,
+      modify_dates, summary_extra_columns, excel_combine_sheets, remote_id
     ) VALUES (
       @name, @description, @job_group_id, @connection_ids, @online_only, @is_multi,
       @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook,
-      @template_path, @template_mode, @schedule, @status, @last_run_at, @last_error, @remote_id
+      @template_path, @template_mode, @schedule, @status, @last_run_at, @last_error,
+      @modify_dates, @summary_extra_columns, @excel_combine_sheets, @remote_id
     )
   `)
   const updateJob = db.prepare(`
@@ -483,6 +557,9 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       status = @status,
       last_run_at = @last_run_at,
       last_error = @last_error,
+      modify_dates = @modify_dates,
+      summary_extra_columns = @summary_extra_columns,
+      excel_combine_sheets = @excel_combine_sheets,
       updated_at = datetime('now')
     WHERE remote_id = @remote_id
   `)
@@ -522,6 +599,9 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
         status: r.status,
         last_run_at: r.lastRunAt,
         last_error: r.lastError,
+        modify_dates: r.modifyDates != null ? (r.modifyDates ? 1 : 0) : 1,
+        summary_extra_columns: r.summaryExtraColumns ? JSON.stringify(r.summaryExtraColumns) : null,
+        excel_combine_sheets: r.excelCombineSheets ? 1 : 0,
         remote_id: r.id
       }
       const existing = findJob.get(r.id) as { id: number } | undefined
@@ -531,6 +611,58 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
   })
   txJ(data.jobs)
 
+  const jobLocal = localIdByRemoteId('jobs')
+  const insertJobVariable = db.prepare(`
+    INSERT INTO job_variables (
+      job_id, remote_id, name, description, default_value, auto_update, source_column, update_fn,
+      created_at, updated_at
+    ) VALUES (
+      @job_id, @remote_id, @name, @description, @default_value, @auto_update, @source_column, @update_fn,
+      @created_at, @updated_at
+    )
+  `)
+  const insertJobVariableValue = db.prepare(`
+    INSERT INTO job_variable_values (job_variable_id, connection_id, value, last_run_at, updated_at)
+    VALUES (@job_variable_id, @connection_id, @value, @last_run_at, @updated_at)
+    ON CONFLICT(job_variable_id, connection_id)
+    DO UPDATE SET value = excluded.value,
+                  last_run_at = excluded.last_run_at,
+                  updated_at = excluded.updated_at
+  `)
+  const txJV = db.transaction((rows: RemoteJobVariable[]) => {
+    for (const r of rows) {
+      const localJobId = jobLocal.get(r.jobId)
+      if (!localJobId) continue
+
+      const result = insertJobVariable.run({
+        job_id: localJobId,
+        remote_id: r.id,
+        name: r.name,
+        description: r.description,
+        default_value: r.defaultValue,
+        auto_update: r.autoUpdate ? 1 : 0,
+        source_column: r.sourceColumn,
+        update_fn: r.updateFn ?? 'max',
+        created_at: r.createdAt ?? new Date().toISOString(),
+        updated_at: r.updatedAt ?? new Date().toISOString()
+      })
+      const localVariableId = result.lastInsertRowid as number
+
+      for (const value of r.values ?? []) {
+        const localConnectionId = connLocal.get(value.connectionId)
+        if (!localConnectionId) continue
+        insertJobVariableValue.run({
+          job_variable_id: localVariableId,
+          connection_id: localConnectionId,
+          value: value.value,
+          last_run_at: value.lastRunAt,
+          updated_at: new Date().toISOString()
+        })
+      }
+    }
+  })
+  txJV(data.jobVariables ?? [])
+
   return {
     stores: data.stores.length,
     fiscalYears: data.fiscalYears.length,
@@ -538,6 +670,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
     jobGroups: data.jobGroups.length,
     connections: data.connections.length,
     jobs: data.jobs.length,
+    jobVariables: data.jobVariables?.length ?? 0,
     settings: data.settings.length
   }
 }
@@ -546,6 +679,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
 
 export async function syncAll(token: string): Promise<SyncResult> {
   if (!token) throw new Error('Authentication token required for sync')
+  if (!API_BASE) throw new Error('BRIDGE_API_URL is not configured')
   // PULL-ONLY: server is master. Admin writes flow directly to server via REST.
   // For the initial seeding of pre-existing local data, call `pushOnce(token)`.
   const pulled = await pullAll(token)
@@ -556,6 +690,7 @@ export async function syncAll(token: string): Promise<SyncResult> {
     jobGroups: 0,
     connections: 0,
     jobs: 0,
+    jobVariables: 0,
     settings: 0
   }
   return { pushed, pulled }
@@ -568,6 +703,7 @@ export async function syncAll(token: string): Promise<SyncResult> {
  */
 export async function pushOnce(token: string): Promise<SyncResult> {
   if (!token) throw new Error('Authentication token required for push')
+  if (!API_BASE) throw new Error('BRIDGE_API_URL is not configured')
   const pushed = await pushAll(token)
   const pulled = await pullAll(token)
   return { pushed, pulled }

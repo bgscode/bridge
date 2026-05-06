@@ -11,7 +11,10 @@ import type {
   CreateJobDto,
   JobRunOptions,
   CombineCsvFolderOptions,
-  CombineCsvFolderResult
+  CombineCsvFolderResult,
+  JobVariable,
+  CreateJobVariableDto,
+  UpdateJobVariableDto
 } from '@shared/index'
 
 declare global {
@@ -94,6 +97,10 @@ declare global {
           sheetNames?: string[]
           activeSheet?: string
         }>
+        previewQuery: (
+          connectionId: number,
+          sql: string
+        ) => Promise<{ columns: string[]; firstRow: Record<string, unknown> | null }>
       }
       groups: {
         getAll: () => Promise<GroupRow[]>
@@ -149,6 +156,14 @@ declare global {
       }
       auth: {
         setContext: (token: string | null, role: string | null) => Promise<void>
+      }
+      jobVariables: {
+        getAll: (jobId: number) => Promise<JobVariable[]>
+        create: (data: CreateJobVariableDto) => Promise<JobVariable>
+        update: (id: number, data: UpdateJobVariableDto) => Promise<JobVariable | undefined>
+        delete: (id: number) => Promise<boolean>
+        setValue: (jobVariableId: number, connectionId: number, value: string) => Promise<boolean>
+        deleteConnectionValues: (jobId: number, connectionId: number) => Promise<boolean>
       }
     }
   }

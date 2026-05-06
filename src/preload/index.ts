@@ -28,10 +28,8 @@ const api = {
     create: (data: unknown) => ipcRenderer.invoke('connections:create', data),
     bulkCreate: (items: unknown[]) => ipcRenderer.invoke('connections:bulkCreate', items),
     update: (id: number, data: unknown) => ipcRenderer.invoke('connections:update', id, data),
-    bulkUpdateCredentials: (
-      ids: number[],
-      creds: { username?: string; password?: string }
-    ) => ipcRenderer.invoke('connections:bulkUpdateCredentials', ids, creds),
+    bulkUpdateCredentials: (ids: number[], creds: { username?: string; password?: string }) =>
+      ipcRenderer.invoke('connections:bulkUpdateCredentials', ids, creds),
     delete: (id: number) => ipcRenderer.invoke('connections:delete', id),
     deleteAll: (ids: number[]) => ipcRenderer.invoke('connections:deleteAll', ids),
     test: (id: number) => ipcRenderer.invoke('connections:test', id),
@@ -62,7 +60,9 @@ const api = {
       ipcRenderer.invoke('jobs:stageUploadBuffer', jobId, filename, buffer),
     cleanupStaged: (stagedPath: string) => ipcRenderer.invoke('jobs:cleanupStaged', stagedPath),
     previewStagedFile: (stagedPath: string, sheetName?: string, sampleRows?: number) =>
-      ipcRenderer.invoke('jobs:previewStagedFile', stagedPath, sheetName, sampleRows)
+      ipcRenderer.invoke('jobs:previewStagedFile', stagedPath, sheetName, sampleRows),
+    previewQuery: (connectionId: number, sql: string) =>
+      ipcRenderer.invoke('jobs:previewQuery', connectionId, sql)
   },
   groups: {
     getAll: () => ipcRenderer.invoke('groups:getAll'),
@@ -115,6 +115,16 @@ const api = {
   auth: {
     setContext: (token: string | null, role: string | null) =>
       ipcRenderer.invoke('auth:set-context', token, role)
+  },
+  jobVariables: {
+    getAll: (jobId: number) => ipcRenderer.invoke('job-variables:getAll', jobId),
+    create: (data: unknown) => ipcRenderer.invoke('job-variables:create', data),
+    update: (id: number, data: unknown) => ipcRenderer.invoke('job-variables:update', id, data),
+    delete: (id: number) => ipcRenderer.invoke('job-variables:delete', id),
+    setValue: (jobVariableId: number, connectionId: number, value: string) =>
+      ipcRenderer.invoke('job-variables:setValue', jobVariableId, connectionId, value),
+    deleteConnectionValues: (jobId: number, connectionId: number) =>
+      ipcRenderer.invoke('job-variables:deleteConnectionValues', jobId, connectionId)
   }
 }
 

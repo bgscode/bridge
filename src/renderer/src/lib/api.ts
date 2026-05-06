@@ -1,4 +1,9 @@
-const API_BASE_URL = 'https://link.yonolight.com'
+const API_BASE_URL = (
+  ((import.meta.env as ImportMetaEnv & Record<string, string | undefined>).BRIDGE_API_URL as
+    | string
+    | undefined) ??
+  (import.meta.env.DEV ? 'http://localhost:4000/api' : 'https://link.yonolight.com/api')
+).replace(/\/$/, '')
 const TOKEN_KEY = 'bridge_auth_token'
 
 export function getToken(): string | null {
@@ -133,16 +138,16 @@ export interface JobRunSyncPayload {
 
 export const authApi = {
   login: (identifier: string, password: string) =>
-    api.postPublic<LoginResponse>('/api/users/login', { identifier, password }),
+    api.postPublic<LoginResponse>('/users/login', { identifier, password }),
   register: (input: {
     userId: string
     name: string
     phone: string
     email?: string
     password: string
-  }) => api.postPublic<AuthUser>('/api/users/register', input),
-  me: () => api.get<AuthUser>('/api/users/me'),
-  logout: () => api.post<{ message: string }>('/api/users/logout')
+  }) => api.postPublic<AuthUser>('/users/register', input),
+  me: () => api.get<AuthUser>('/users/me'),
+  logout: () => api.post<{ message: string }>('/users/logout')
 }
 
 // ── Users (admin) ───────────────────────────────────────────────────────────
@@ -166,10 +171,10 @@ export interface AdminUserUpdate {
 }
 
 export const usersApi = {
-  list: () => api.get<AuthUser[]>('/api/users'),
-  create: (input: AdminUserInput) => api.post<AuthUser>('/api/users', input),
-  update: (id: string, input: AdminUserUpdate) => api.patch<AuthUser>(`/api/users/${id}`, input),
-  remove: (id: string) => api.delete<void>(`/api/users/${id}`)
+  list: () => api.get<AuthUser[]>('/users'),
+  create: (input: AdminUserInput) => api.post<AuthUser>('/users', input),
+  update: (id: string, input: AdminUserUpdate) => api.patch<AuthUser>(`/users/${id}`, input),
+  remove: (id: string) => api.delete<void>(`/users/${id}`)
 }
 
 // ── Assignments (admin) ─────────────────────────────────────────────────────
@@ -180,33 +185,32 @@ export interface UserAssignments {
 }
 
 export const assignmentsApi = {
-  get: (userId: string) => api.get<UserAssignments>(`/api/assignments/users/${userId}`),
+  get: (userId: string) => api.get<UserAssignments>(`/assignments/users/${userId}`),
   setConnections: (userId: string, ids: string[]) =>
-    api.put<{ connectionIds: string[] }>(`/api/assignments/users/${userId}/connections`, { ids }),
+    api.put<{ connectionIds: string[] }>(`/assignments/users/${userId}/connections`, { ids }),
   setJobs: (userId: string, ids: string[]) =>
-    api.put<{ jobIds: string[] }>(`/api/assignments/users/${userId}/jobs`, { ids })
+    api.put<{ jobIds: string[] }>(`/assignments/users/${userId}/jobs`, { ids })
 }
 
 // ── Connections ─────────────────────────────────────────────────────────────
 
 export const connectionsApi = {
-  list: () => api.get<ServerConnection[]>('/api/connections'),
+  list: () => api.get<ServerConnection[]>('/connections'),
   assign: (connectionId: string, userId: string) =>
-    api.post<ServerConnection>('/api/connections/assign', { connectionId, userId })
+    api.post<ServerConnection>('/connections/assign', { connectionId, userId })
 }
 
 // ── Jobs ────────────────────────────────────────────────────────────────────
 
 export const jobsApi = {
-  list: () => api.get<ServerJob[]>('/api/jobs'),
-  assign: (jobId: string, userId: string) =>
-    api.post<ServerJob>('/api/jobs/assign', { jobId, userId })
+  list: () => api.get<ServerJob[]>('/jobs'),
+  assign: (jobId: string, userId: string) => api.post<ServerJob>('/jobs/assign', { jobId, userId })
 }
 
 // ── Job Runs ────────────────────────────────────────────────────────────────
 
 export const jobRunsApi = {
-  sync: (payload: JobRunSyncPayload) => api.post<unknown>('/api/job-runs/sync', payload),
+  sync: (payload: JobRunSyncPayload) => api.post<unknown>('/job-runs/sync', payload),
   adminUsage: () =>
     api.get<
       Array<{
@@ -214,12 +218,12 @@ export const jobRunsApi = {
         totalRuns: number
         lastRunAt: string | null
       }>
-    >('/api/job-runs/admin/usage'),
+    >('/job-runs/admin/usage'),
   adminAll: (filters?: { jobId?: string; userId?: string }) => {
     const qs = new URLSearchParams()
     if (filters?.jobId) qs.set('jobId', filters.jobId)
     if (filters?.userId) qs.set('userId', filters.userId)
     const q = qs.toString()
-    return api.get<unknown[]>(`/api/job-runs/admin/all${q ? `?${q}` : ''}`)
+    return api.get<unknown[]>(`/job-runs/admin/all${q ? `?${q}` : ''}`)
   }
 }

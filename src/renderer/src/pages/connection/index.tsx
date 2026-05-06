@@ -25,8 +25,17 @@ import { formatUtcToIst } from '@renderer/lib/utils'
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
 export default function ConnectionPage(): JSX.Element {
-  const { connections, create, update, remove, removeMany, bulkCreate, bulkUpdateCredentials, updateStatus, reload } =
-    useConnections()
+  const {
+    connections,
+    create,
+    update,
+    remove,
+    removeMany,
+    bulkCreate,
+    bulkUpdateCredentials,
+    updateStatus,
+    reload
+  } = useConnections()
   const { groups, reload: reloadGroups } = useGroups()
   const { stores, reload: reloadStores } = useStores()
   const { fiscalYears, reload: reloadFiscalYears } = useFiscalYears()
@@ -111,6 +120,7 @@ export default function ConnectionPage(): JSX.Element {
   function handleFormSubmit(values: ConnectionFormValues): void {
     const dto = {
       ...values,
+      password: values.password ?? '',
       trust_cert: values.trust_cert ? 1 : 0,
       group_id: values.group_id ?? null,
       store_id: values.store_id ?? null,
@@ -636,9 +646,7 @@ export default function ConnectionPage(): JSX.Element {
         onOpenChange={setBulkCredsOpen}
         count={Object.keys(rowSelection).length}
         onSubmit={async (creds) => {
-          const ids = connections
-            .filter((c) => rowSelection[String(c.id)])
-            .map((c) => c.id)
+          const ids = connections.filter((c) => rowSelection[String(c.id)]).map((c) => c.id)
           if (ids.length === 0) return
           await bulkUpdateCredentials(ids, creds)
           setRowSelection({})

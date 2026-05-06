@@ -1,8 +1,10 @@
 import { ipcMain } from 'electron'
 import { jobRepository } from '../db/repositories/job.repository'
+import { connection as connectionRepo } from '../db/repositories/connection.repository'
 import { CreateJobDto, UpdateJobDto, JobRunOptions } from '@shared/index'
 import { runJob, cancelJob, getRunningJobs, isJobRunning } from '../services/job/job-executor'
 import { getSchedulerStatus, rescheduleJob } from '../services/job/job-scheduler'
+import { connectUsingBestIp } from '../services/connection/sql-connector'
 import {
   stageFile,
   stageBuffer,
@@ -18,6 +20,34 @@ function handleError(err: unknown): never {
     throw new Error('A job with this name already exists.')
   }
   throw new Error(e.message ?? 'An unexpected error occurred.')
+}
+
+function sanitizePreviewSql(sql: string): string {
+  // Replace runtime template placeholders so preview can execute in editor mode.
+  return sql.replace(/\{\{\s*[a-zA-Z_][a-zA-Z0-9_]*\s*\}\}/g, 'NULL')
+}
+
+function getPreviewColumns(result: unknown, firstRow: Record<string, unknown> | null): string[] {
+  if (firstRow) return Object.keys(firstRow)
+
+  const maybeResult = result as {
+    recordset?: Array<Record<string, unknown>> & {
+      columns?: Record<string, { index?: number; name?: string }>
+    }
+    columns?: Record<string, { index?: number; name?: string }>
+  }
+
+  const columnsMeta = maybeResult.recordset?.columns ?? maybeResult.columns
+  if (!columnsMeta) return []
+
+  const entries = Object.entries(columnsMeta).sort(
+    (a, b) => (a[1]?.index ?? Number.MAX_SAFE_INTEGER) - (b[1]?.index ?? Number.MAX_SAFE_INTEGER)
+  )
+
+  return entries.map(([key, meta], idx) => {
+    const name = (meta?.name ?? key ?? '').trim()
+    return name.length > 0 ? name : `_col_${idx + 1}`
+  })
 }
 
 export function registerJobIpc(): void {
@@ -162,6 +192,39 @@ export function registerJobIpc(): void {
         return await previewActionFile(stagedPath, { sheetName, sampleRows })
       } catch (error) {
         handleError(error)
+      }
+    }
+  )
+
+  // ── SQL Column Preview (runs TOP 1 on a single connection) ─────────────────
+  ipcMain.handle(
+    'jobs:previewQuery',
+    async (
+      _,
+      connectionId: number,
+      sql: string
+    ): Promise<{ columns: string[]; firstRow: Record<string, unknown> | null }> => {
+      const conn = connectionRepo.findById(connectionId)
+      if (!conn) throw new Error('Connection not found')
+
+      const trimmed = sanitizePreviewSql(sql.trim().replace(/;+\s*$/g, ''))
+      if (!trimmed) {
+        return { columns: [], firstRow: null }
+      }
+
+      // Keep the original SELECT shape (no derived-table wrapper) to avoid
+      // "No column name was specified" errors for unnamed expressions.
+      const previewSql = `SET NOCOUNT ON; SET ROWCOUNT 1; ${trimmed}; SET ROWCOUNT 0;`
+
+      let connected: Awaited<ReturnType<typeof connectUsingBestIp>> | null = null
+      try {
+        connected = await connectUsingBestIp(conn, 15, 15)
+        const result = await connected.pool.request().query(previewSql)
+        const firstRow = (result.recordset?.[0] as Record<string, unknown>) ?? null
+        const columns = getPreviewColumns(result, firstRow)
+        return { columns, firstRow }
+      } finally {
+        connected?.pool.close().catch(() => {})
       }
     }
   )

@@ -1,14 +1,15 @@
-import { JSX, useEffect } from 'react'
+import { JSX, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
-import { Activity, Clock, RotateCcw, Save, Zap } from 'lucide-react'
+import { Activity, Clock, RotateCcw, Save, UploadCloud, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
+import { getToken } from '@/lib/api'
 import type { AppSettings } from '@shared/index'
 
 // ─── Schema ────────────────────────────────────────────────────────────────────
@@ -105,6 +106,41 @@ function NumberInputWithUnit({ unit, children }: NumberInputProps): JSX.Element 
 // ─── Page ──────────────────────────────────────────────────────────────────────
 
 export default function SettingsPage(): JSX.Element {
+  const [isPushing, setIsPushing] = useState(false)
+
+  async function handlePushAll(): Promise<void> {
+    const token = getToken()
+    if (!token) {
+      toast.error('Not logged in — please log in first.')
+      return
+    }
+    setIsPushing(true)
+    try {
+      const result = await window.api.sync.pushOnce(token)
+      const total =
+        result.pushed.jobs +
+        result.pushed.connections +
+        result.pushed.jobVariables +
+        result.pushed.groups +
+        result.pushed.stores +
+        result.pushed.fiscalYears +
+        result.pushed.jobGroups +
+        result.pushed.settings
+      toast.success(
+        `Push complete — ${total} records sent to server (${result.pushed.jobs} jobs, ${result.pushed.jobVariables} variables, ${result.pushed.connections} connections).`
+      )
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const friendly =
+        msg.includes('too large') || msg.includes('413')
+          ? 'Payload too large — ask your backend developer to increase the body size limit to 50 MB (express.json({ limit: "50mb" })).'
+          : `Push failed: ${msg}`
+      toast.error(friendly)
+    } finally {
+      setIsPushing(false)
+    }
+  }
+
   const {
     register,
     handleSubmit,
@@ -431,6 +467,29 @@ export default function SettingsPage(): JSX.Element {
                   )}
                 />
               </button>
+            </SettingRow>
+          </Section>
+
+          {/* Data Sync */}
+          <Section
+            icon={<UploadCloud className="size-3.5" />}
+            title="Data Sync"
+            description="Push all local data from this computer up to the server"
+          >
+            <SettingRow
+              label="Push all data to server"
+              description="Uploads every job, connection, group, store, and setting from this machine to the server. Safe to run multiple times — existing records are updated, not duplicated."
+            >
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isPushing}
+                onClick={handlePushAll}
+              >
+                <UploadCloud className="mr-1.5 size-3" />
+                {isPushing ? 'Pushing…' : 'Push now'}
+              </Button>
             </SettingRow>
           </Section>
         </div>

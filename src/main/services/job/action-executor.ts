@@ -281,7 +281,7 @@ export async function runActionJob(jobId: number, webContents: WebContents): Pro
 
   progress.finished_at = new Date().toISOString()
   jobRepository.update(jobId, {
-    status: progress.status === 'cancelled' ? 'failed' : progress.status,
+    status: progress.status,
     last_run_at: progress.finished_at,
     last_error: progress.error
   } as Partial<JobRow>)

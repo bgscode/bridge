@@ -332,8 +332,81 @@ const migrations: Migration[] = [
         (c) => c.name
       )
       if (!cols.includes('last_failed_connection_ids')) {
+        db.exec("ALTER TABLE jobs ADD COLUMN last_failed_connection_ids TEXT NOT NULL DEFAULT '[]'")
+      }
+    }
+  },
+  {
+    version: 19,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('modify_dates')) {
+        db.exec('ALTER TABLE jobs ADD COLUMN modify_dates INTEGER NOT NULL DEFAULT 1')
+      }
+    }
+  },
+  {
+    version: 20,
+    sql: `
+      CREATE TABLE IF NOT EXISTS job_variables (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id         INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        name           TEXT    NOT NULL,
+        description    TEXT,
+        default_value  TEXT,
+        auto_update    INTEGER NOT NULL DEFAULT 0,
+        source_column  TEXT,
+        update_fn      TEXT    NOT NULL DEFAULT 'max',
+        created_at     TEXT    DEFAULT (datetime('now')),
+        updated_at     TEXT    DEFAULT (datetime('now')),
+        UNIQUE(job_id, name)
+      );
+
+      CREATE TABLE IF NOT EXISTS job_variable_values (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_variable_id   INTEGER NOT NULL REFERENCES job_variables(id) ON DELETE CASCADE,
+        connection_id     INTEGER NOT NULL,
+        value             TEXT,
+        last_run_at       TEXT,
+        updated_at        TEXT    DEFAULT (datetime('now')),
+        UNIQUE(job_variable_id, connection_id)
+      );
+    `
+  },
+  {
+    version: 21,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('summary_extra_columns')) {
+        db.exec('ALTER TABLE jobs ADD COLUMN summary_extra_columns TEXT DEFAULT NULL')
+      }
+    }
+  },
+  {
+    version: 22,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('excel_combine_sheets')) {
+        db.exec('ALTER TABLE jobs ADD COLUMN excel_combine_sheets INTEGER NOT NULL DEFAULT 0')
+      }
+    }
+  },
+  {
+    version: 23,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(job_variables)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('remote_id')) {
+        db.exec('ALTER TABLE job_variables ADD COLUMN remote_id TEXT DEFAULT NULL')
         db.exec(
-          "ALTER TABLE jobs ADD COLUMN last_failed_connection_ids TEXT NOT NULL DEFAULT '[]'"
+          'CREATE INDEX IF NOT EXISTS idx_job_variables_remote_id ON job_variables(remote_id)'
         )
       }
     }

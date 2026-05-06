@@ -171,6 +171,19 @@ export interface JobRow {
    * - null       → no template; behaves like current plain Excel output.
    */
   template_mode: 'new' | 'existing' | null
+  /**
+   * When true (default), date/datetime values from SQL are reformatted to
+   * "dd/mm/yyyy" in the Excel output (time component stripped).
+   * When false, date values are written exactly as they come from the server.
+   */
+  modify_dates: boolean
+  /**
+   * Extra columns to append to the Summary sheet after the "Sheet Name" column.
+   * Each value is a key like "group_name", "store_name", "fiscal_year_name",
+   * "static_ip", "vpn_ip", "db_name". Stored as JSON array.
+   */
+  summary_extra_columns: string[] | null
+  excel_combine_sheets: boolean
   // schedule — JSON string, see ScheduleConfig
   schedule: string | null
   // runtime state
@@ -342,3 +355,39 @@ export interface CombineCsvFolderResult {
   total_rows: number
   skipped_files: string[]
 }
+
+// ─── Job Variables ────────────────────────────────────────────────────────────
+
+export interface JobVariable {
+  id: number
+  job_id: number
+  remote_id?: string | null
+  /** Placeholder name used in SQL: {{name}} */
+  name: string
+  description: string | null
+  /** Value used when no per-connection value has been set yet */
+  default_value: string | null
+  /** When true, executor auto-updates value after a successful connection run */
+  auto_update: boolean
+  /** SQL column to read from the result set for auto-update */
+  source_column: string | null
+  /** How to compute the new value from the result rows */
+  update_fn: 'max' | 'min' | 'last'
+  created_at: string
+  updated_at: string
+  /** Per-connection checkpoint values — joined by repository */
+  values: JobVariableValue[]
+}
+
+export interface JobVariableValue {
+  id: number
+  job_variable_id: number
+  /** Intentionally not a FK — connection may be removed from the job */
+  connection_id: number
+  value: string | null
+  last_run_at: string | null
+  updated_at: string
+}
+
+export type CreateJobVariableDto = Omit<JobVariable, 'id' | 'created_at' | 'updated_at' | 'values'>
+export type UpdateJobVariableDto = Partial<Omit<CreateJobVariableDto, 'job_id'>>

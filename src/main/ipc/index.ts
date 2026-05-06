@@ -10,12 +10,14 @@ import { registerJobIpc } from './job.ipc'
 import { registerCombinerIpc } from './combiner.ipc'
 import { registerSyncIpc } from './sync.ipc'
 import { registerAuthIpc } from './auth.ipc'
+import { registerJobVariableIpc } from './job-variable.ipc'
 
 export function registerAllIpc(): void {
   registerWindowIpc()
   registerAuthIpc()
   registerConnectionIpc()
   registerJobIpc()
+  registerJobVariableIpc()
   registerGroupIpc()
   registerJobGroupIpc()
   registerStoreIpc()

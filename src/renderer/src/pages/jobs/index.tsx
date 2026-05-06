@@ -1,6 +1,6 @@
 import { JSX, type SetStateAction, useCallback, useLayoutEffect, useRef, useState } from 'react'
 import type { RowSelectionState } from '@tanstack/react-table'
-import { BriefcaseBusiness, Play, Plus, RotateCcw, Trash2 } from 'lucide-react'
+import { BriefcaseBusiness, Play, Plus, RotateCcw, Trash2, Variable } from 'lucide-react'
 
 import { DataGrid, type DataGridColumnDef } from '@/components/data-grid'
 import { Badge } from '@/components/ui/badge'
@@ -11,10 +11,11 @@ import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { RowActionsMenu } from '@/components/ui/row-actions-menu'
 import { Separator } from '@/components/ui/separator'
 import type { CreateJobDto, JobRow, UpdateJobDto, JobRunOptions } from '@shared/index'
-import { useJobGroups, useJobs } from '@/contexts'
+import { useConnections, useJobGroups, useJobs } from '@/contexts'
 import { useAuth } from '@/contexts/auth-context'
 import { JobForm, type JobFormValues } from './components/form'
 import { JobRunDialog } from './components/run-dialog'
+import { JobVariablesPanel } from './components/job-variables-panel'
 import { formatUtcToIst } from '@/lib/utils'
 
 // ─── Status badge helper ───────────────────────────────────────────────────────
@@ -32,6 +33,7 @@ const statusVariant: Record<JobRow['status'], 'default' | 'secondary' | 'outline
 export default function JobsPage(): JSX.Element {
   const { jobs, create, update, remove, removeMany, run } = useJobs()
   const { jobGroups } = useJobGroups()
+  const { connections } = useConnections()
   const { user: me } = useAuth()
   const isAdmin = me?.role === 'admin'
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
@@ -42,6 +44,7 @@ export default function JobsPage(): JSX.Element {
   const [deleteTarget, setDeleteTarget] = useState<JobRow | null>(null)
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
   const [runTarget, setRunTarget] = useState<JobRow | null>(null)
+  const [varPanelJob, setVarPanelJob] = useState<JobRow | null>(null)
 
   useLayoutEffect(() => {
     isMountedRef.current = true
@@ -87,7 +90,16 @@ export default function JobsPage(): JSX.Element {
       notify_webhook: values.notify_webhook || null,
       template_path: isAction ? null : (values.template_path ?? null),
       template_mode: isAction ? null : (values.template_mode ?? null),
-      schedule: values.schedule ?? null
+      modify_dates: isAction ? true : (values.modify_dates ?? true),
+      schedule: values.schedule ?? null,
+      summary_extra_columns:
+        !isAction && values.destination_type === 'excel'
+          ? (values.summary_extra_columns ?? null)
+          : null,
+      excel_combine_sheets:
+        !isAction && values.destination_type === 'excel' && !values.is_multi
+          ? (values.excel_combine_sheets ?? false)
+          : false
     }
     if (formMode === 'create') {
       create(dto)
@@ -113,7 +125,10 @@ export default function JobsPage(): JSX.Element {
       notify_webhook: job.notify_webhook,
       template_path: job.template_path,
       template_mode: job.template_mode,
-      schedule: job.schedule
+      modify_dates: job.modify_dates,
+      schedule: job.schedule,
+      summary_extra_columns: job.summary_extra_columns,
+      excel_combine_sheets: job.excel_combine_sheets
     })
   }
 
@@ -259,6 +274,17 @@ export default function JobsPage(): JSX.Element {
                   <Play className="size-4" />
                   Run Now
                 </DropdownMenuItem>
+                {row.original.type === 'query' && (
+                  <DropdownMenuItem
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setVarPanelJob(row.original)
+                    }}
+                  >
+                    <Variable className="size-4" />
+                    Variables
+                  </DropdownMenuItem>
+                )}
                 {row.original.status === 'failed' && (
                   <DropdownMenuItem
                     onClick={(e) => {
@@ -393,6 +419,19 @@ export default function JobsPage(): JSX.Element {
         }}
         onConfirm={handleRunConfirm}
       />
+
+      {/* Variables panel */}
+      {varPanelJob && (
+        <JobVariablesPanel
+          isOpen={!!varPanelJob}
+          onOpenChange={(o) => {
+            if (!o && isMountedRef.current) setVarPanelJob(null)
+          }}
+          jobId={varPanelJob.id}
+          jobName={varPanelJob.name}
+          connections={connections.filter((c) => varPanelJob.connection_ids.includes(c.id))}
+        />
+      )}
     </div>
   )
 }

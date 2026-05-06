@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { WebContents } from 'electron'
-import type { AppSettings } from '@shared/index'
+import { DEFAULT_SETTINGS, type AppSettings } from '@shared/index'
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -44,6 +44,7 @@ function makeWebContents(destroyed = false): WebContents {
 
 function defaultSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
+    ...DEFAULT_SETTINGS,
     monitor_enabled: true,
     monitor_startup_test: true,
     monitor_workers: 2,

@@ -350,8 +350,8 @@ function loadServiceAccountCredentials(config: GoogleSheetsConfig): ServiceAccou
     throw new Error('service_account_json is missing required fields (client_email, private_key).')
   }
   // PEM keys often arrive with literal "\n" — restore real newlines.
-  if (key.includes('\\n')) key = key.replace(/\\n/g, '\n')
-  return { client_email: email, private_key: key }
+  const privateKey = key.includes('\\n') ? key.replace(/\\n/g, '\n') : key
+  return { client_email: email, private_key: privateKey }
 }
 
 function uniqueTabName(rawLabel: string, taken: Set<string>): string {

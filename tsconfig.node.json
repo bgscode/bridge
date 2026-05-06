@@ -5,11 +5,9 @@
     "composite": true,
     "types": ["electron-vite/node"],
     "moduleResolution": "bundler",
-    "ignoreDeprecations": "5.0",
-    "baseUrl": ".",
     "paths": {
       "@shared/*": [
-        "src/types/*"
+        "./src/types/*"
       ]
     }
   }

@@ -36,6 +36,10 @@ export async function bootstrap(): Promise<void> {
   // process. We log it and keep the app responsive — individual operations
   // still surface errors via their own IPC error paths.
   process.on('uncaughtException', (err) => {
+    // Suppress known tedious library bug: connection reaches 'Final' state
+    // then fires a belated socketError event that the state machine can't
+    // handle. It is entirely harmless — the connection is already closed.
+    if (err.message?.includes("No event 'socketError' in state 'Final'")) return
     console.error('[main] uncaughtException:', err)
   })
   process.on('unhandledRejection', (reason) => {

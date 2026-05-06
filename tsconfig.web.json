@@ -10,18 +10,16 @@
   "compilerOptions": {
     "composite": true,
     "jsx": "react-jsx",
-    "baseUrl": ".",
-    "ignoreDeprecations": "5.0",
     "moduleResolution": "bundler",
     "paths": {
       "@renderer/*": [
-        "src/renderer/src/*"
+        "./src/renderer/src/*"
       ],
       "@/*": [
-        "src/renderer/src/*"
+        "./src/renderer/src/*"
       ],
       "@shared/*": [
-        "src/types/*"
+        "./src/types/*"
       ]
     }
   }

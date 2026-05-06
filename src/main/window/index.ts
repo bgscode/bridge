@@ -53,7 +53,7 @@ export function createMainWindow(): BrowserWindow {
   // our branding during development instead of the Electron default.
   if (process.platform === 'darwin' && iconImage) {
     try {
-      app.dock.setIcon(iconImage)
+      app.dock?.setIcon(iconImage)
     } catch (err) {
       // ignore
     }
@@ -81,7 +81,7 @@ export function createMainWindow(): BrowserWindow {
   // branding instead of the Electron badge during development.
   if (process.platform === 'darwin' && iconImage) {
     try {
-      app.dock.setIcon(iconImage)
+      app.dock?.setIcon(iconImage)
     } catch (err) {
       // ignore
     }

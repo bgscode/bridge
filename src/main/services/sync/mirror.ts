@@ -8,9 +8,9 @@
  */
 import { getAuthToken, isAdmin } from '../auth-context'
 import db from '../../db/index'
-import type { ConnectionRow, JobRow } from '@shared/index'
+import type { ConnectionRow, JobRow, JobVariable } from '@shared/index'
 
-const API_BASE = process.env.BRIDGE_API_URL ?? 'https://link.yonolight.com/api'
+const API_BASE = process.env.BRIDGE_API_URL
 
 /**
  * Calls the server. Returns `null` only when the user is not an admin (or not
@@ -18,9 +18,16 @@ const API_BASE = process.env.BRIDGE_API_URL ?? 'https://link.yonolight.com/api'
  * (network, 4xx/5xx, server error response) THROWS so the IPC handler can
  * surface the error to the renderer.
  */
-async function call<T>(method: string, path: string, body?: unknown): Promise<T | null> {
+async function call<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  options: { adminOnly?: boolean } = { adminOnly: true }
+): Promise<T | null> {
+  if (!API_BASE) return null
   const token = getAuthToken()
-  if (!token || !isAdmin()) return null
+  if (!token) return null
+  if (options.adminOnly !== false && !isAdmin()) return null
   let res: Response
   try {
     res = await fetch(`${API_BASE}${path}`, {
@@ -123,7 +130,10 @@ function buildJobBody(row: JobRow): Record<string, unknown> {
     template_path: row.template_path ?? null,
     template_mode: row.template_mode ?? null,
     schedule: row.schedule ?? null,
-    status: row.status ?? 'idle'
+    status: row.status ?? 'idle',
+    modify_dates: row.modify_dates !== false,
+    summary_extra_columns: row.summary_extra_columns ?? null,
+    excel_combine_sheets: !!row.excel_combine_sheets
   }
 }
 
@@ -145,6 +155,83 @@ export async function mirrorJobDelete(localId: number): Promise<void> {
   const rid = remoteIdOf('jobs', localId)
   if (!rid) return
   await call('DELETE', `/jobs/${rid}`)
+}
+
+// ── Job Variables ─────────────────────────────────────────────────────────
+
+function buildJobVariableBody(row: JobVariable): Record<string, unknown> | null {
+  const jobId = remoteIdOf('jobs', row.job_id)
+  if (!jobId) return null
+  return {
+    jobId,
+    name: row.name,
+    description: row.description ?? null,
+    defaultValue: row.default_value ?? null,
+    autoUpdate: !!row.auto_update,
+    sourceColumn: row.source_column ?? null,
+    updateFn: row.update_fn ?? 'max'
+  }
+}
+
+export async function mirrorJobVariableCreate(row: JobVariable): Promise<void> {
+  const body = buildJobVariableBody(row)
+  if (!body) return
+  const created = await call<{ id: string }>('POST', '/job-variables', body, { adminOnly: false })
+  if (created?.id) saveRemoteId('job_variables', row.id, created.id)
+}
+
+export async function mirrorJobVariableUpdate(row: JobVariable): Promise<void> {
+  const rid = row.remote_id ?? remoteIdOf('job_variables', row.id)
+  if (!rid) {
+    await mirrorJobVariableCreate(row)
+    return
+  }
+  const body = buildJobVariableBody(row)
+  if (!body) return
+  await call('PATCH', `/job-variables/${rid}`, body, { adminOnly: false })
+}
+
+export async function mirrorJobVariableDelete(localId: number): Promise<void> {
+  const rid = remoteIdOf('job_variables', localId)
+  if (!rid) return
+  await call('DELETE', `/job-variables/${rid}`, undefined, { adminOnly: false })
+}
+
+export async function mirrorJobVariableSetValue(
+  jobVariableId: number,
+  connectionId: number,
+  value: string
+): Promise<void> {
+  const variableRemoteId = remoteIdOf('job_variables', jobVariableId)
+  const connectionRemoteId = remoteIdOf('connections', connectionId)
+  if (!variableRemoteId || !connectionRemoteId) return
+  await call(
+    'POST',
+    `/job-variables/${variableRemoteId}/values`,
+    {
+      connectionId: connectionRemoteId,
+      value,
+      lastRunAt: new Date().toISOString()
+    },
+    { adminOnly: false }
+  )
+}
+
+export async function mirrorJobVariableDeleteConnectionValues(
+  jobId: number,
+  connectionId: number
+): Promise<void> {
+  const jobRemoteId = remoteIdOf('jobs', jobId)
+  const connectionRemoteId = remoteIdOf('connections', connectionId)
+  if (!jobRemoteId || !connectionRemoteId) return
+  await call(
+    'DELETE',
+    `/job-variables/by-job/${jobRemoteId}/by-connection/${connectionRemoteId}`,
+    undefined,
+    {
+      adminOnly: false
+    }
+  )
 }
 
 // ── Catalog upsert helpers (groups / job_groups / stores / fiscal_years) ──

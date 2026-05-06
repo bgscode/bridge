@@ -14,8 +14,13 @@ import type {
 import { connectUsingBestIp } from '../connection/sql-connector'
 import { connection as connectionRepo } from '../../db/repositories/connection.repository'
 import { jobRepository } from '../../db/repositories/job.repository'
+import { jobVariableRepository } from '../../db/repositories/job-variable.repository'
+import { mirrorJobVariableSetValue } from '../sync/mirror'
 import { settingsRepo } from '../../db/repositories/settings.repository'
 import { storeRepository } from '../../db/repositories/store.repository'
+import { groupRepository } from '../../db/repositories/group.repository'
+import { fiscalYearRepository } from '../../db/repositories/fiscal-year.repository'
+import { getAuthToken } from '../auth-context'
 import { getAdaptiveBrain, type HealthSnapshot } from './adaptive-brain'
 import { decideOutputFormat } from './output-decision'
 import { runActionJob } from './action-executor'
@@ -30,6 +35,12 @@ const CHUNK_SIZE = 5000
 const MAX_ROWS_PER_CONNECTION = 20_000_000
 /** Append mode on huge datasets is memory-heavy with XLSX merge; switch to fresh file above this */
 const APPEND_SAFE_ROW_LIMIT = 200_000
+/**
+ * Skip in-place workbook loading above this file size to avoid OOM.
+ * writeInPlaceExcelReplace returns null so the caller falls back to the
+ * streaming writer which never holds the full workbook in heap at once.
+ */
+const MAX_IN_PLACE_WORKBOOK_BYTES = 200 * 1024 * 1024 // 200 MB
 
 // ─── Running jobs map ─────────────────────────────────────────────────────────
 
@@ -102,14 +113,84 @@ export function cancelJob(jobId: number): boolean {
 // ─── Emit helper ──────────────────────────────────────────────────────────────
 
 /**
- * Returns Desktop/<AppName>_job_output/ as the fallback output base directory
+ * Returns Desktop/Job_Output/ as the fallback output base directory
  * when the configured destination path is inaccessible (e.g. a mapped network
  * drive or Windows drive letter that doesn't exist on this machine), or when
  * the job has no destination configured at all. Files always land here as a
  * last resort so users never lose a run's output.
  */
 function appDesktopBaseDir(): string {
-  return path.join(app.getPath('desktop'), `${app.getName()}_job_output`)
+  return path.join(app.getPath('desktop'), 'Job_Output')
+}
+
+function isHttpUrl(value: string | null | undefined): boolean {
+  if (!value) return false
+  return /^https?:\/\//i.test(value)
+}
+
+function localTemplateFileName(templatePath: string): string {
+  let rawName = 'template.xlsx'
+  try {
+    const parsed = new URL(templatePath)
+    const fromUrl = path.basename(decodeURIComponent(parsed.pathname || ''))
+    if (fromUrl) rawName = fromUrl
+  } catch {
+    // fallback name
+  }
+
+  const legacyExcelName = rawName.match(/^(.+)\.(xlsx|xlsm|xls)(?:[-_](\d+))?$/i)
+  if (legacyExcelName) {
+    const [, stem, ext, suffix] = legacyExcelName
+    const excelName = `${stem}${suffix ? `-${suffix}` : ''}.${ext}`
+    return `_template_${sanitizeFileName(excelName)}`
+  }
+
+  const ext = /^\.xls[xm]?$/i.test(path.extname(rawName)) ? path.extname(rawName) : '.xlsx'
+  const stem = path.basename(rawName, path.extname(rawName)) || 'template'
+  return `_template_${sanitizeFileName(stem)}${ext}`
+}
+
+async function fetchTemplateResponse(templatePath: string): Promise<Response> {
+  const direct = await fetch(templatePath)
+  if (direct.ok) return direct
+
+  const apiBase = process.env.BRIDGE_API_URL
+  const token = getAuthToken()
+  if (!apiBase || !token) return direct
+
+  const proxied = await fetch(
+    `${apiBase}/upload/file?fileUrl=${encodeURIComponent(templatePath)}`,
+    {
+      headers: { Authorization: `Bearer ${token}` }
+    }
+  )
+  return proxied.ok ? proxied : direct
+}
+
+async function resolveMachineLocalTemplatePath(
+  templatePath: string | null,
+  jobName: string
+): Promise<string | null> {
+  if (!templatePath) return null
+
+  if (!isHttpUrl(templatePath)) {
+    return fs.existsSync(templatePath) ? templatePath : null
+  }
+
+  const jobDir = path.join(appDesktopBaseDir(), sanitizeFileName(jobName))
+  await fs.promises.mkdir(jobDir, { recursive: true })
+
+  const localTemplatePath = path.join(jobDir, localTemplateFileName(templatePath))
+  if (fs.existsSync(localTemplatePath)) return localTemplatePath
+
+  const res = await fetchTemplateResponse(templatePath)
+  if (!res.ok) {
+    throw new Error(`Failed to download Excel template (HTTP ${res.status})`)
+  }
+
+  const arrayBuffer = await res.arrayBuffer()
+  await fs.promises.writeFile(localTemplatePath, Buffer.from(arrayBuffer))
+  return localTemplatePath
 }
 
 function emit(webContents: WebContents, progress: JobProgress): void {
@@ -738,13 +819,51 @@ function formatQueryValue(v: unknown): unknown {
 /**
  * Apply `formatQueryValue` to every value in a row object, returning a
  * new object with dates converted to dd/mm/yyyy strings.
+ * When `modifyDates` is false the row is returned as-is.
  */
-function formatQueryRow(row: Record<string, unknown>): Record<string, unknown> {
+function formatQueryRow(row: Record<string, unknown>, modifyDates = true): Record<string, unknown> {
+  if (!modifyDates) return row
   const out: Record<string, unknown> = {}
   for (const key of Object.keys(row)) {
     out[key] = formatQueryValue(row[key])
   }
   return out
+}
+
+/**
+ * Replace `{{varName}}` placeholders in a SQL query string with the
+ * per-connection values. Falls back to `defaultValue` when the connection
+ * has no stored checkpoint yet. Warns and leaves the placeholder when
+ * neither a stored value nor a default is available (so the query still
+ * runs and the user sees an obvious SQL error rather than a silent wrong result).
+ */
+function injectVariables(
+  sql: string,
+  connVars: Record<string, string>,
+  varMeta: Map<
+    string,
+    {
+      id: number
+      defaultValue: string | null
+      autoUpdate: boolean
+      sourceColumn: string | null
+      updateFn: 'max' | 'min' | 'last'
+    }
+  >
+): string {
+  return sql.replace(/\{\{([^}]+)\}\}/g, (match, name: string) => {
+    const trimmed = name.trim()
+    // Stored per-connection value takes priority
+    if (trimmed in connVars) return connVars[trimmed]
+    // Fall back to the variable's default_value
+    const meta = varMeta.get(trimmed)
+    if (meta?.defaultValue != null) return meta.defaultValue
+    // Nothing found — leave placeholder (will cause a SQL error that the user can debug)
+    console.warn(
+      `[job-executor] Variable {{${trimmed}}} has no value or default — left as placeholder`
+    )
+    return match
+  })
 }
 
 function sanitizeSheetName(name: string): string {
@@ -1120,11 +1239,22 @@ async function writeInPlaceExcelReplace(
   connections: ConnectionRow[],
   allChunkFiles: Map<string, string[]>,
   queryNames: string[] = [],
-  allBucketMeta: Map<string, BucketMeta> = new Map()
+  allBucketMeta: Map<string, BucketMeta> = new Map(),
+  modifyDates = true,
+  summaryExtraColumns: string[] = []
 ): Promise<string | null> {
   const workbook = new ExcelJS.Workbook()
   const fileExists = fs.existsSync(filePath)
   if (fileExists) {
+    // Refuse to load very large files into the V8 heap — loading a 200 MB+
+    // workbook can exhaust the process memory and crash with OOM. The caller
+    // falls back to writeStreamingExcelReplace which writes incrementally.
+    try {
+      const { size } = fs.statSync(filePath)
+      if (size > MAX_IN_PLACE_WORKBOOK_BYTES) return null
+    } catch {
+      return null
+    }
     try {
       await workbook.xlsx.readFile(filePath)
     } catch {
@@ -1198,7 +1328,7 @@ async function writeInPlaceExcelReplace(
 
     for (const chunkFile of bucket.chunkFiles) {
       await streamChunkRows(chunkFile, (row) => {
-        const fmtRow = formatQueryRow(row)
+        const fmtRow = formatQueryRow(row, modifyDates)
         if (!headersSet) {
           headers = Object.keys(fmtRow)
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
@@ -1218,7 +1348,104 @@ async function writeInPlaceExcelReplace(
     }
   }
 
-  writeSummarySheet(workbook, jobName, progress, connections, queryNames, allBucketMeta)
+  writeSummarySheet(
+    workbook,
+    jobName,
+    progress,
+    connections,
+    queryNames,
+    allBucketMeta,
+    summaryExtraColumns
+  )
+
+  let fileDir = path.dirname(filePath)
+  try {
+    if (!fs.existsSync(fileDir)) await fs.promises.mkdir(fileDir, { recursive: true })
+  } catch {
+    fileDir = appDesktopBaseDir()
+    await fs.promises.mkdir(fileDir, { recursive: true })
+    filePath = path.join(fileDir, path.basename(filePath))
+  }
+
+  await workbook.xlsx.writeFile(filePath)
+  return filePath
+}
+
+async function writeStreamingExcelCombined(
+  destPath: string,
+  jobName: string,
+  progress: JobProgress,
+  connections: ConnectionRow[],
+  allChunkFiles: Map<string, string[]>,
+  summaryExtraColumns: string[] = [],
+  modifyDates = true
+): Promise<string> {
+  let filePath: string
+  if (isDirectoryPath(destPath)) {
+    const fileName = `${sanitizeFileName(jobName)}_${fileTimestamp()}.xlsx`
+    const baseDir = fs.existsSync(destPath) ? destPath : appDesktopBaseDir()
+    await fs.promises.mkdir(baseDir, { recursive: true })
+    filePath = path.join(baseDir, fileName)
+  } else {
+    const parsed = path.parse(destPath)
+    const baseDir = fs.existsSync(parsed.dir) ? parsed.dir : appDesktopBaseDir()
+    await fs.promises.mkdir(baseDir, { recursive: true })
+    filePath = path.join(baseDir, parsed.base)
+  }
+
+  const workbook = new ExcelJS.Workbook()
+  const dataSheet = workbook.addWorksheet('Data')
+
+  let globalHeaders: string[] = []
+  let globalHeadersSet = false
+
+  for (const conn of connections) {
+    const chunkTag = chunkTagFor(conn.id, null)
+    const chunkFiles = allChunkFiles.get(chunkTag) ?? []
+    if (chunkFiles.length === 0) continue
+
+    let connSectionStarted = false
+    let connHasData = false
+
+    for (const chunkFile of chunkFiles) {
+      await streamChunkRows(chunkFile, (row) => {
+        const fmtRow = formatQueryRow(row, modifyDates)
+        const values = Object.values(fmtRow) as unknown[]
+        const rowKeys = Object.keys(fmtRow)
+
+        // Discover column headers from first data row
+        if (!globalHeadersSet) {
+          globalHeaders = rowKeys
+          dataSheet.columns = globalHeaders.map((h) => ({
+            width: Math.max(18, Math.min(40, h.length + 4))
+          }))
+          globalHeadersSet = true
+        }
+
+        // Write connection section header + column headers before first data row
+        if (!connSectionStarted) {
+          const connHeaderRow = dataSheet.addRow([conn.name])
+          connHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 }
+          connHeaderRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } }
+
+          const colHeaderRow = dataSheet.addRow(globalHeaders)
+          colHeaderRow.font = { bold: true }
+          colHeaderRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } }
+
+          connSectionStarted = true
+        }
+
+        dataSheet.addRow(values)
+        connHasData = true
+      })
+    }
+
+    if (connHasData) {
+      dataSheet.addRow([]) // blank separator between connection sections
+    }
+  }
+
+  writeSummarySheet(workbook, jobName, progress, connections, [], new Map(), summaryExtraColumns)
 
   let fileDir = path.dirname(filePath)
   try {
@@ -1245,7 +1472,9 @@ async function writeStreamingExcel(
     templateMode: 'new' | 'existing' | null
   },
   queryNames: string[] = [],
-  allBucketMeta: Map<string, BucketMeta> = new Map()
+  allBucketMeta: Map<string, BucketMeta> = new Map(),
+  modifyDates = true,
+  summaryExtraColumns: string[] = []
 ): Promise<string> {
   let filePath: string
   let effectiveOp = operation
@@ -1307,7 +1536,9 @@ async function writeStreamingExcel(
       connections,
       allChunkFiles,
       queryNames,
-      allBucketMeta
+      allBucketMeta,
+      modifyDates,
+      summaryExtraColumns
     )
     if (written) return written
 
@@ -1331,7 +1562,10 @@ async function writeStreamingExcel(
       connections,
       allChunkFiles,
       queryNames,
-      allBucketMeta
+      allBucketMeta,
+      undefined,
+      modifyDates,
+      summaryExtraColumns
     )
   }
 
@@ -1374,7 +1608,10 @@ async function writeStreamingExcel(
       connections,
       allChunkFiles,
       queryNames,
-      allBucketMeta
+      allBucketMeta,
+      undefined,
+      modifyDates,
+      summaryExtraColumns
     )
   }
 
@@ -1461,7 +1698,7 @@ async function writeStreamingExcel(
     for (const chunkFile of bucket.chunkFiles) {
       let firstRowSeen = false
       await streamChunkRows(chunkFile, (row) => {
-        const fmtRow = formatQueryRow(row)
+        const fmtRow = formatQueryRow(row, modifyDates)
         if (!headersSet) {
           headers = Object.keys(fmtRow)
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
@@ -1486,7 +1723,15 @@ async function writeStreamingExcel(
     // No data-sheet styling — see Summary-only styling note above.
   }
 
-  writeSummarySheet(workbook, jobName, progress, connections, queryNames, allBucketMeta)
+  writeSummarySheet(
+    workbook,
+    jobName,
+    progress,
+    connections,
+    queryNames,
+    allBucketMeta,
+    summaryExtraColumns
+  )
 
   let fileDir = path.dirname(filePath)
   try {
@@ -1510,7 +1755,9 @@ async function writeStreamingExcelReplace(
   allChunkFiles: Map<string, string[]>,
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
-  preservedSheets: PreservedSheet[] = []
+  preservedSheets: PreservedSheet[] = [],
+  modifyDates = true,
+  summaryExtraColumns: string[] = []
 ): Promise<string> {
   let resolvedDir = path.dirname(filePath)
   try {
@@ -1591,7 +1838,9 @@ async function writeStreamingExcelReplace(
             )
             writeHeader()
           }
-          const values = headers.map((key) => formatQueryValue(row[key]) as ExcelJS.CellValue)
+          const values = headers.map(
+            (key) => (modifyDates ? formatQueryValue(row[key]) : row[key]) as ExcelJS.CellValue
+          )
           sheet.addRow(values).commit()
           rowsInSheet++
         })
@@ -1633,9 +1882,49 @@ async function writeStreamingExcelReplace(
       connLabelMapReplace.set(c.id, resolveConnectionLabel(c))
     }
 
+    const extraColKeys = summaryExtraColumns.filter(Boolean)
+    const extraLabels: Record<string, string> = {
+      group_name: 'Group',
+      store_name: 'Store',
+      fiscal_year_name: 'Fiscal Year',
+      static_ip: 'Static IP',
+      vpn_ip: 'VPN IP',
+      db_name: 'Database'
+    }
+    const groupMap = new Map<number, string>()
+    const storeMap = new Map<number, string>()
+    const fiscalYearMap = new Map<number, string>()
+    if (extraColKeys.includes('group_name')) {
+      for (const group of groupRepository.findAll()) groupMap.set(group.id, group.name)
+    }
+    if (extraColKeys.includes('store_name')) {
+      for (const store of storeRepository.findAll()) storeMap.set(store.id, store.name)
+    }
+    if (extraColKeys.includes('fiscal_year_name')) {
+      for (const fiscalYear of fiscalYearRepository.findAll()) {
+        fiscalYearMap.set(fiscalYear.id, fiscalYear.name)
+      }
+    }
+    const extraValuesFor = (connId: number): string[] => {
+      const conn = connections.find((c) => c.id === connId)
+      if (!conn) return extraColKeys.map(() => '')
+      return extraColKeys.map((key) => {
+        if (key === 'group_name') return conn.group_id ? (groupMap.get(conn.group_id) ?? '') : ''
+        if (key === 'store_name') return conn.store_id ? (storeMap.get(conn.store_id) ?? '') : ''
+        if (key === 'fiscal_year_name') {
+          return conn.fiscal_year_id ? (fiscalYearMap.get(conn.fiscal_year_id) ?? '') : ''
+        }
+        if (key === 'static_ip') return conn.static_ip ?? ''
+        if (key === 'vpn_ip') return conn.vpn_ip ?? ''
+        if (key === 'db_name') return conn.db_name ?? ''
+        return ''
+      })
+    }
+
     const summaryHeaders = [
       'Connection',
       'Sheet Name',
+      ...extraColKeys.map((key) => extraLabels[key] ?? key),
       'Status',
       'Rows',
       'Started At',
@@ -1657,6 +1946,7 @@ async function writeStreamingExcelReplace(
       .addRow([
         `Job: ${jobName}`,
         '',
+        ...extraColKeys.map(() => ''),
         progress.status,
         progress.total_rows,
         formatUtcToIst(startedAt),
@@ -1671,6 +1961,7 @@ async function writeStreamingExcelReplace(
       .addRow([
         `Summary: ${successCount}/${progress.total_connections} successful`,
         '',
+        ...extraColKeys.map(() => ''),
         progress.failed_connections > 0 ? 'partial' : 'ok',
         progress.total_rows,
         '',
@@ -1702,6 +1993,7 @@ async function writeStreamingExcelReplace(
           .addRow([
             conn.connection_name,
             '',
+            ...extraValuesFor(conn.connection_id),
             conn.status,
             conn.rows,
             formatUtcToIst(conn.started_at),
@@ -1721,6 +2013,7 @@ async function writeStreamingExcelReplace(
             .addRow([
               `  ↳ ${qLabel}`,
               querySheetLabel,
+              ...extraValuesFor(conn.connection_id),
               meta?.error ? 'error' : meta !== undefined ? 'done' : '',
               meta?.error ? 0 : (meta?.rows ?? 0),
               '',
@@ -1736,6 +2029,7 @@ async function writeStreamingExcelReplace(
           .addRow([
             conn.connection_name,
             sheetLabelReplace,
+            ...extraValuesFor(conn.connection_id),
             conn.status,
             conn.rows,
             formatUtcToIst(conn.started_at),
@@ -1780,7 +2074,8 @@ function writeSummarySheet(
   progress: JobProgress,
   connections: ConnectionRow[] = [],
   queryNames: string[] = [],
-  allBucketMeta: Map<string, BucketMeta> = new Map()
+  allBucketMeta: Map<string, BucketMeta> = new Map(),
+  summaryExtraColumns: string[] = []
 ): void {
   const existing = workbook.getWorksheet('Summary')
   if (existing) workbook.removeWorksheet(existing.id)
@@ -1806,11 +2101,76 @@ function writeSummarySheet(
 
   const isMultiQuery = queryNames.length > 0
 
+  // Build lookup maps for extra column resolution (group, store, fiscal year)
+  const extraColKeys = summaryExtraColumns.filter(Boolean)
+  const needsGroupLookup = extraColKeys.includes('group_name')
+  const needsStoreLookup = extraColKeys.includes('store_name')
+  const needsFiscalLookup = extraColKeys.includes('fiscal_year_name')
+
+  const groupMap = new Map<number, string>()
+  const storeMap = new Map<number, string>()
+  const fiscalYearMap = new Map<number, string>()
+
+  if (needsGroupLookup) {
+    for (const g of groupRepository.findAll()) groupMap.set(g.id, g.name)
+  }
+  if (needsStoreLookup) {
+    for (const s of storeRepository.findAll()) storeMap.set(s.id, s.name)
+  }
+  if (needsFiscalLookup) {
+    for (const fy of fiscalYearRepository.findAll()) fiscalYearMap.set(fy.id, fy.name)
+  }
+
+  /** Return the extra column values for a given connection (keyed by column key). */
+  function getExtraValues(connId: number): Record<string, string> {
+    const conn = connections.find((c) => c.id === connId)
+    if (!conn || !extraColKeys.length) return {}
+    const vals: Record<string, string> = {}
+    for (const key of extraColKeys) {
+      switch (key) {
+        case 'group_name':
+          vals[key] = conn.group_id ? (groupMap.get(conn.group_id) ?? '') : ''
+          break
+        case 'store_name':
+          vals[key] = conn.store_id ? (storeMap.get(conn.store_id) ?? '') : ''
+          break
+        case 'fiscal_year_name':
+          vals[key] = conn.fiscal_year_id ? (fiscalYearMap.get(conn.fiscal_year_id) ?? '') : ''
+          break
+        case 'static_ip':
+          vals[key] = conn.static_ip ?? ''
+          break
+        case 'vpn_ip':
+          vals[key] = conn.vpn_ip ?? ''
+          break
+        case 'db_name':
+          vals[key] = conn.db_name ?? ''
+          break
+        default:
+          vals[key] = ''
+      }
+    }
+    return vals
+  }
+
+  const extraColumnDefs: Partial<ExcelJS.Column>[] = extraColKeys.map((key) => {
+    const labels: Record<string, string> = {
+      group_name: 'Group',
+      store_name: 'Store',
+      fiscal_year_name: 'Fiscal Year',
+      static_ip: 'Static IP',
+      vpn_ip: 'VPN IP',
+      db_name: 'Database'
+    }
+    return { header: labels[key] ?? key, key, width: 20 }
+  })
+
   // Sheet Name is now shown in BOTH single- and multi-query mode so users can
   // always trace a row back to the worksheet that holds its data.
   sheet.columns = [
     { header: 'Connection', key: 'connection_name', width: 28 },
     { header: 'Sheet Name', key: 'sheet_name', width: 22 },
+    ...extraColumnDefs,
     { header: 'Status', key: 'status', width: 12 },
     { header: 'Rows', key: 'rows', width: 10 },
     { header: 'Started At', key: 'started_at', width: 24 },
@@ -1889,6 +2249,7 @@ function writeSummarySheet(
       sheet.addRow({
         connection_name: conn.connection_name,
         sheet_name: '',
+        ...getExtraValues(conn.connection_id),
         status: conn.status,
         rows: conn.rows,
         started_at: formatUtcToIst(conn.started_at),
@@ -1920,6 +2281,7 @@ function writeSummarySheet(
       sheet.addRow({
         connection_name: conn.connection_name,
         sheet_name: sheetLabel,
+        ...getExtraValues(conn.connection_id),
         status: conn.status,
         rows: conn.rows,
         started_at: formatUtcToIst(conn.started_at),
@@ -2373,22 +2735,19 @@ export async function runJob(
 
   // Excel destination must always produce output, even when the job has no
   // path configured or the configured path is unreachable. Fall back to
-  // `Desktop/<AppName>_job_output/` so the run is never silently dropped.
+  // `Desktop/Job_Output/` so the run is never silently dropped.
   const isExcelDestination = !job.destination_type || job.destination_type === 'excel'
   let effectiveDestinationConfig: string | null = job.destination_config
   if (isExcelDestination) {
-    const cfg = typeof effectiveDestinationConfig === 'string' ? effectiveDestinationConfig : ''
-    const cfgValid =
-      cfg.trim().length > 0 && (fs.existsSync(cfg) || fs.existsSync(path.dirname(cfg)))
-    if (!cfgValid) {
-      const fallback = appDesktopBaseDir()
-      try {
-        fs.mkdirSync(fallback, { recursive: true })
-      } catch {
-        // mkdir failures surface later when the writer attempts the same path
-      }
-      effectiveDestinationConfig = fallback
+    // Excel always writes to Desktop/Job_Output/<job>/ so assigned
+    // users never depend on another machine's local path.
+    const fallback = path.join(appDesktopBaseDir(), sanitizeFileName(job.name))
+    try {
+      fs.mkdirSync(fallback, { recursive: true })
+    } catch {
+      // mkdir failures surface later when the writer attempts the same path
     }
+    effectiveDestinationConfig = fallback
   }
 
   const settings = settingsRepo.getAll()
@@ -2426,6 +2785,11 @@ export async function runJob(
   if (queries.length === 0 || queries.every((q) => !q.trim())) {
     throw new Error('No SQL queries defined for this job')
   }
+
+  // ── Job Variables: load per-connection checkpoints + variable meta ─────────
+  const jobVarMeta = jobVariableRepository.getVariableMetaForJob(jobId)
+  // connVarMap: Map<connectionId, Record<varName, value>>
+  const connVarMap = jobVariableRepository.getValueMapForJob(jobId)
 
   const progress: JobProgress = {
     job_id: jobId,
@@ -2575,15 +2939,24 @@ export async function runJob(
 
         throttled.emit(progress)
 
+        // Resolve per-connection variable values for query injection
+        const connVars = connVarMap.get(conn.id) ?? {}
+
         // Multi-query jobs produce one output bucket (sheet / CSV) per query
         // per connection. Single-query jobs use one bucket per connection.
         const plan = isMultiQuery
           ? queries.map((q, qIdx) => ({
-              queries: [q],
+              queries: [injectVariables(q, connVars, jobVarMeta)],
               tag: chunkTagFor(conn.id, qIdx),
               queryIdx: qIdx as number | null
             }))
-          : [{ queries, tag: chunkTagFor(conn.id, null), queryIdx: null as number | null }]
+          : [
+              {
+                queries: queries.map((q) => injectVariables(q, connVars, jobVarMeta)),
+                tag: chunkTagFor(conn.id, null),
+                queryIdx: null as number | null
+              }
+            ]
 
         let aggregateRows = 0
         let aggregateError: string | null = null
@@ -2707,6 +3080,54 @@ export async function runJob(
           connProgress.status = 'done'
           connProgress.rows = aggregateRows
           connProgress.finished_at = new Date().toISOString()
+
+          // ── Auto-update job variables after a successful connection run ──
+          // Only when no error and not cancelled. We skip failed connections
+          // so they retry from their last safe checkpoint value.
+          if (jobVarMeta.size > 0 && aggregateChunkFiles.length > 0) {
+            for (const [varName, meta] of jobVarMeta) {
+              if (!meta.autoUpdate || !meta.sourceColumn) continue
+              // Collect all chunk files for this connection across all plan steps
+              const connChunkFiles = aggregateChunkFiles.flatMap((x) => x.files)
+              if (connChunkFiles.length === 0) continue
+              try {
+                let best: string | null = null
+                const col = meta.sourceColumn
+                for (const chunkFile of connChunkFiles) {
+                  const rows = await readChunkFromFile(chunkFile)
+                  for (const row of rows) {
+                    const raw = row[col]
+                    if (raw === null || raw === undefined) continue
+                    const str = raw instanceof Date ? raw.toISOString() : String(raw)
+                    if (best === null) {
+                      best = str
+                    } else if (meta.updateFn === 'max' && str > best) {
+                      best = str
+                    } else if (meta.updateFn === 'min' && str < best) {
+                      best = str
+                    } else if (meta.updateFn === 'last') {
+                      best = str
+                    }
+                  }
+                }
+                if (best !== null) {
+                  jobVariableRepository.upsertValue(meta.id, conn.id, best)
+                  await mirrorJobVariableSetValue(meta.id, conn.id, best)
+                  // Update the in-memory connVarMap so later plan steps (if any)
+                  // within the same job run can see the updated value.
+                  const updated = connVarMap.get(conn.id) ?? {}
+                  updated[varName] = best
+                  connVarMap.set(conn.id, updated)
+                }
+              } catch (varErr) {
+                // Non-fatal — variable update failure should never abort the job
+                console.warn(
+                  `[job-executor] Failed to auto-update variable "${varName}" for connection ${conn.id}:`,
+                  varErr
+                )
+              }
+            }
+          }
         } else if (wasCancelled) {
           connProgress.status = 'pending'
           connProgress.error = null
@@ -2830,20 +3251,33 @@ export async function runJob(
           progress.adaptive.output_reason = 'excel destination — streaming workbook'
         }
 
-        const actualPath = await writeStreamingExcel(
-          destPath,
-          job.operation,
-          job.name,
-          progress,
-          connections,
-          allChunkFiles,
-          {
-            templatePath: job.template_path,
-            templateMode: job.template_mode
-          },
-          isMultiQuery ? (job.sql_query_names ?? []) : [],
-          allBucketMeta
-        )
+        const actualPath =
+          job.excel_combine_sheets && !isMultiQuery
+            ? await writeStreamingExcelCombined(
+                destPath,
+                job.name,
+                progress,
+                connections,
+                allChunkFiles,
+                job.summary_extra_columns ?? [],
+                job.modify_dates !== false
+              )
+            : await writeStreamingExcel(
+                destPath,
+                job.operation,
+                job.name,
+                progress,
+                connections,
+                allChunkFiles,
+                {
+                  templatePath: await resolveMachineLocalTemplatePath(job.template_path, job.name),
+                  templateMode: job.template_mode
+                },
+                isMultiQuery ? (job.sql_query_names ?? []) : [],
+                allBucketMeta,
+                job.modify_dates !== false,
+                job.summary_extra_columns ?? []
+              )
 
         progress.output_path = actualPath
       } else if (job.destination_type === 'api') {

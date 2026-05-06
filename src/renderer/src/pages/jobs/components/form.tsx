@@ -2,7 +2,8 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 import { JSX, useEffect, useRef, useState } from 'react'
-import { FileText, FolderOpen, Plus, Trash2 } from 'lucide-react'
+import { FileText, Plus, Trash2, RefreshCw } from 'lucide-react'
+import type { JobVariable } from '@shared/index'
 
 import { cn, getSpreadsheetId } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -21,6 +22,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { SelectBox } from '@/components/select-box'
+import { FileUploader } from '@/components/FileUploader'
 import { useConnections, useFiscalYears, useGroups, useJobGroups, useStores } from '@/contexts'
 import { usePersistentDraft } from '@/hooks/use-persistent-draft'
 
@@ -34,6 +36,7 @@ const schema = z
     type: z.enum(['query', 'action']),
     online_only: z.boolean(),
     is_multi: z.boolean(),
+    modify_dates: z.boolean(),
     connection_ids: z.array(z.number()).min(1, 'At least one connection is required'),
     sql_query: z.array(z.string().min(1, 'Query cannot be empty')),
     sql_query_names: z.array(z.string()).optional(),
@@ -51,6 +54,10 @@ const schema = z
     excel_path: z.string().optional().nullable(),
     template_path: z.string().optional().nullable(),
     template_mode: z.enum(['new', 'existing']).nullable().optional(),
+    // Summary sheet extra columns (Excel only)
+    summary_extra_columns: z.array(z.string()).optional().nullable(),
+    // Combine all connections into one sheet (single-query Excel only)
+    excel_combine_sheets: z.boolean(),
     // Action destination config
     action_file_path: z.string().optional().nullable(),
     action_file_name: z.string().optional().nullable(),
@@ -88,6 +95,7 @@ const DEFAULT_FORM_VALUES: JobFormValues = {
   type: 'query',
   online_only: false,
   is_multi: false,
+  modify_dates: true,
   connection_ids: [],
   sql_query: [''],
   sql_query_names: [],
@@ -104,6 +112,8 @@ const DEFAULT_FORM_VALUES: JobFormValues = {
   excel_path: '',
   template_path: null,
   template_mode: null,
+  summary_extra_columns: null,
+  excel_combine_sheets: false,
   action_file_path: '',
   action_file_name: '',
   action_sheet_name: '',
@@ -210,7 +220,7 @@ interface JobFormProps {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
   mode: 'create' | 'edit'
-  data?: Partial<JobFormValues> & { schedule_raw?: string | null }
+  data?: Partial<JobFormValues> & { id?: number; schedule_raw?: string | null }
   onSubmit: (values: JobFormValues) => void
 }
 
@@ -459,6 +469,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const jobType = useWatch({ control, name: 'type' })
   const onlineOnly = useWatch({ control, name: 'online_only' })
   const isMulti = useWatch({ control, name: 'is_multi' })
+  const modifyDates = useWatch({ control, name: 'modify_dates' })
   const sqlQueries = useWatch({ control, name: 'sql_query' }) ?? []
   const scheduleEnabled = useWatch({ control, name: 'schedule_enabled' })
   const scheduleType = useWatch({ control, name: 'schedule_type' })
@@ -468,9 +479,12 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const selectedJobGroupId = useWatch({ control, name: 'job_group_id' })
   const selectedConnectionIds = useWatch({ control, name: 'connection_ids' }) ?? []
   const sheetIdInput = useWatch({ control, name: 'sheet_id' })
+  const jobNameInput = useWatch({ control, name: 'name' })
   const currentSheetName = useWatch({ control, name: 'sheet_name' })
   const apiMethod = useWatch({ control, name: 'api_method' })
-  const excelPath = useWatch({ control, name: 'excel_path' })
+  const templatePath = useWatch({ control, name: 'template_path' })
+  const summaryExtraCols = (useWatch({ control, name: 'summary_extra_columns' }) ?? []) as string[]
+  const excelCombineSheets = useWatch({ control, name: 'excel_combine_sheets' }) ?? false
   const operation = useWatch({ control, name: 'operation' })
   const actionTargetTable = useWatch({ control, name: 'action_target_table' })
   const actionMode = useWatch({ control, name: 'action_mode' })
@@ -486,6 +500,117 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const [actionPreviewLoading, setActionPreviewLoading] = useState(false)
   const [actionPreviewError, setActionPreviewError] = useState<string | null>(null)
   const [mappingDialogOpen, setMappingDialogOpen] = useState(false)
+
+  // ── SQL textarea refs for variable insertion at cursor ────────────────────
+  const sqlTextareaRefs = useRef<Array<HTMLTextAreaElement | null>>([])
+  const activeSqlIdxRef = useRef<number>(0)
+
+  function insertVariable(varName: string): void {
+    const idx = activeSqlIdxRef.current
+    const el = sqlTextareaRefs.current[idx]
+    const token = `{{${varName}}}`
+    if (!el) {
+      // fallback — append to end
+      const current = getValues(`sql_query.${idx}` as `sql_query.${number}`) ?? ''
+      setValue(`sql_query.${idx}` as `sql_query.${number}`, current + token)
+      return
+    }
+    const start = el.selectionStart ?? el.value.length
+    const end = el.selectionEnd ?? el.value.length
+    const newVal = el.value.slice(0, start) + token + el.value.slice(end)
+    setValue(`sql_query.${idx}` as `sql_query.${number}`, newVal, { shouldDirty: true })
+    requestAnimationFrame(() => {
+      el.focus()
+      const pos = start + token.length
+      el.setSelectionRange(pos, pos)
+    })
+  }
+
+  // ── Job Variables state (edit mode only — job id required) ────────────────
+  const jobId = mode === 'edit' ? data?.id : undefined
+  const [jobVariables, setJobVariables] = useState<JobVariable[]>([])
+  const [varDraft, setVarDraft] = useState<{
+    name: string
+    description: string
+    default_value: string
+    auto_update: boolean
+    source_column: string
+    update_fn: 'max' | 'min' | 'last'
+  }>({
+    name: '',
+    description: '',
+    default_value: '',
+    auto_update: false,
+    source_column: '',
+    update_fn: 'max'
+  })
+  const [addingVar, setAddingVar] = useState(false)
+  const [varError, setVarError] = useState<string | null>(null)
+
+  // ── Column preview (from running SQL on one connection) ───────────────────
+  const [previewCols, setPreviewCols] = useState<string[]>([])
+  const [previewFirstRow, setPreviewFirstRow] = useState<Record<string, unknown> | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [showColPicker, setShowColPicker] = useState(false) // dropdown open for source_column
+  // In multi-query mode the user picks which query index to load columns from
+  const [previewQueryIndex, setPreviewQueryIndex] = useState(0)
+
+  async function fetchQueryColumns(queryIdx?: number): Promise<void> {
+    const connIds = getValues('connection_ids') ?? []
+    const idx = queryIdx ?? previewQueryIndex
+    const sql = (getValues('sql_query') ?? [])[idx] ?? ''
+    if (!sql.trim()) {
+      setPreviewError('Write a SQL query first')
+      return
+    }
+    // Pick first online connection that belongs to this job
+    const onlineConn =
+      connections.find((c) => connIds.includes(c.id) && c.status === 'online') ??
+      connections.find((c) => connIds.includes(c.id))
+    if (!onlineConn) {
+      setPreviewError('No connections selected')
+      return
+    }
+
+    setPreviewLoading(true)
+    setPreviewError(null)
+    setPreviewCols([])
+    setPreviewFirstRow(null)
+    try {
+      const result = await window.api.jobs.previewQuery(onlineConn.id, sql)
+      setPreviewCols(result.columns)
+      setPreviewFirstRow(result.firstRow)
+    } catch (err) {
+      setPreviewError(err instanceof Error ? err.message : 'Preview failed')
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
+  async function loadVariables(): Promise<void> {
+    if (!jobId) return
+    try {
+      const vars = await window.api.jobVariables.getAll(jobId)
+      setJobVariables(vars)
+    } catch {
+      // non-fatal
+    }
+  }
+
+  useEffect(() => {
+    if (isOpen && jobId) {
+      void loadVariables()
+    } else {
+      setJobVariables([])
+      setAddingVar(false)
+      setVarError(null)
+      setPreviewCols([])
+      setPreviewFirstRow(null)
+      setPreviewError(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, jobId])
 
   useEffect(() => {
     if (isOpen) {
@@ -556,6 +681,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         type: data?.type ?? 'query',
         online_only: data?.online_only ?? false,
         is_multi: data?.is_multi ?? false,
+        modify_dates: data?.modify_dates ?? true,
         connection_ids: data?.connection_ids ?? [],
         sql_query: data?.sql_query?.length ? data.sql_query : [''],
         sql_query_names: data?.sql_query?.length
@@ -578,6 +704,8 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         excel_path,
         template_path: data?.template_path ?? null,
         template_mode: data?.template_mode ?? null,
+        summary_extra_columns: data?.summary_extra_columns ?? null,
+        excel_combine_sheets: data?.excel_combine_sheets ?? false,
         action_file_path,
         action_file_name,
         action_sheet_name,
@@ -743,18 +871,15 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         credentials: values.sheet_credentials ?? ''
       })
     } else if (values.destination_type === 'excel') {
-      destination_config = values.excel_path ?? null
+      destination_config = null
     }
 
-    // Auto-derive template from the Excel destination path:
-    //   - destination ends in .xlsx → treat it AS the template (existing mode),
-    //     combiner rewrites INTO this file rather than creating a new one.
-    //   - destination is a folder → no template; new .xlsx created per run.
+    // Excel template is optional and comes from uploader URL/path.
     let derivedTemplatePath: string | null = null
     let derivedTemplateMode: 'new' | 'existing' | null = null
     if (values.destination_type === 'excel') {
-      const p = (values.excel_path ?? '').trim()
-      if (p.toLowerCase().endsWith('.xlsx')) {
+      const p = (values.template_path ?? '').trim()
+      if (p) {
         derivedTemplatePath = p
         derivedTemplateMode = 'existing'
       }
@@ -817,10 +942,19 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
     }
     onSubmit({
       ...values,
+      operation: values.destination_type === 'excel' ? 'replace' : values.operation,
       destination_config,
       schedule,
       template_path: derivedTemplatePath,
-      template_mode: derivedTemplateMode
+      template_mode: derivedTemplateMode,
+      summary_extra_columns:
+        values.destination_type === 'excel' && Array.isArray(values.summary_extra_columns)
+          ? values.summary_extra_columns
+          : null,
+      excel_combine_sheets:
+        values.destination_type === 'excel' && !values.is_multi
+          ? (values.excel_combine_sheets ?? false)
+          : false
     } as JobFormValues)
     if (mode === 'create') {
       skipAutoSaveOnCloseRef.current = true
@@ -1100,6 +1234,37 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                       />
                     </button>
                   </div>
+
+                  {/* modify_dates toggle — query-type only */}
+                  {jobType === 'query' && (
+                    <div className="flex items-center justify-between rounded-lg border border-dashed px-3 py-2">
+                      <div>
+                        <p className="text-xs font-medium">Modify date format</p>
+                        <p className="text-xs text-muted-foreground">
+                          When ON, dates are formatted as dd/mm/yyyy (time removed). When OFF, date
+                          values are written exactly as received from the server.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={modifyDates}
+                        onClick={() => setValue('modify_dates', !modifyDates)}
+                        className={cn(
+                          'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent',
+                          'transition-colors duration-200 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                          modifyDates ? 'bg-primary' : 'bg-input'
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            'pointer-events-none block size-4 rounded-full bg-background shadow ring-0 transition-transform duration-200',
+                            modifyDates ? 'translate-x-4' : 'translate-x-0'
+                          )}
+                        />
+                      </button>
+                    </div>
+                  )}
                 </div>
               </FormSection>
 
@@ -1117,47 +1282,80 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                   {isMulti ? (
                     /* Multi mode — manual add/remove queries (same for query and action) */
                     <>
-                      {sqlQueries.map((_, i) => (
-                        <div key={i} className="flex flex-col gap-2 p-3 rounded-lg border">
-                          <div className="flex items-center justify-between gap-2">
-                            <Input
-                              placeholder={`Query name (e.g., Sales Data, Inventory)`}
-                              className="flex-1 text-xs h-8"
-                              {...register(`sql_query_names.${i}` as `sql_query_names.${number}`)}
+                      {sqlQueries.map((_, i) => {
+                        const { ref: regRef, ...regRest } = register(
+                          `sql_query.${i}` as `sql_query.${number}`
+                        )
+                        return (
+                          <div key={i} className="flex flex-col gap-2 p-3 rounded-lg border">
+                            <div className="flex items-center justify-between gap-2">
+                              <Input
+                                placeholder={`Query name (e.g., Sales Data, Inventory)`}
+                                className="flex-1 text-xs h-8"
+                                {...register(`sql_query_names.${i}` as `sql_query_names.${number}`)}
+                              />
+                              {sqlQueries.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const queries = getValues('sql_query')
+                                    const names = getValues('sql_query_names') ?? []
+                                    setValue(
+                                      'sql_query',
+                                      queries.filter((_, idx) => idx !== i)
+                                    )
+                                    setValue(
+                                      'sql_query_names',
+                                      names.filter((_, idx) => idx !== i)
+                                    )
+                                  }}
+                                  className="text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                                >
+                                  <Trash2 className="size-3.5" />
+                                </button>
+                              )}
+                            </div>
+                            <Textarea
+                              placeholder={
+                                jobType === 'action'
+                                  ? "INSERT INTO logs (event) VALUES ('job_run')"
+                                  : 'SELECT * FROM sales WHERE date = GETDATE()'
+                              }
+                              rows={3}
+                              className="font-mono text-xs resize-none"
+                              onFocus={() => {
+                                activeSqlIdxRef.current = i
+                              }}
+                              ref={(el) => {
+                                regRef(el)
+                                sqlTextareaRefs.current[i] = el
+                              }}
+                              {...regRest}
                             />
-                            {sqlQueries.length > 1 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const queries = getValues('sql_query')
-                                  const names = getValues('sql_query_names') ?? []
-                                  setValue(
-                                    'sql_query',
-                                    queries.filter((_, idx) => idx !== i)
-                                  )
-                                  setValue(
-                                    'sql_query_names',
-                                    names.filter((_, idx) => idx !== i)
-                                  )
-                                }}
-                                className="text-muted-foreground hover:text-destructive transition-colors shrink-0"
-                              >
-                                <Trash2 className="size-3.5" />
-                              </button>
+                            {jobVariables.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                                <span className="text-[10px] text-muted-foreground shrink-0">
+                                  Insert:
+                                </span>
+                                {jobVariables.map((v) => (
+                                  <button
+                                    key={v.id}
+                                    type="button"
+                                    title={v.description ?? `Insert {{${v.name}}}`}
+                                    onClick={() => {
+                                      activeSqlIdxRef.current = i
+                                      insertVariable(v.name)
+                                    }}
+                                    className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-primary/10 hover:bg-primary/20 text-primary transition-colors cursor-pointer"
+                                  >
+                                    {`{{${v.name}}}`}
+                                  </button>
+                                ))}
+                              </div>
                             )}
                           </div>
-                          <Textarea
-                            placeholder={
-                              jobType === 'action'
-                                ? "INSERT INTO logs (event) VALUES ('job_run')"
-                                : 'SELECT * FROM sales WHERE date = GETDATE()'
-                            }
-                            rows={3}
-                            className="font-mono text-xs resize-none"
-                            {...register(`sql_query.${i}` as `sql_query.${number}`)}
-                          />
-                        </div>
-                      ))}
+                        )
+                      })}
                       <Button
                         type="button"
                         variant="outline"
@@ -1175,24 +1373,468 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                     </>
                   ) : (
                     /* Single query — shared across all connections */
-                    <Textarea
-                      placeholder={
-                        jobType === 'action'
-                          ? "INSERT INTO logs (event) VALUES ('job_run')"
-                          : 'SELECT * FROM sales WHERE date = GETDATE()'
-                      }
-                      rows={4}
-                      className="font-mono text-xs resize-none"
-                      {...register('sql_query.0')}
-                    />
+                    (() => {
+                      const { ref: regRef, ...regRest } = register('sql_query.0')
+                      return (
+                        <div className="flex flex-col gap-1.5">
+                          <Textarea
+                            placeholder={
+                              jobType === 'action'
+                                ? "INSERT INTO logs (event) VALUES ('job_run')"
+                                : 'SELECT * FROM sales WHERE date = GETDATE()'
+                            }
+                            rows={4}
+                            className="font-mono text-xs resize-none"
+                            onFocus={() => {
+                              activeSqlIdxRef.current = 0
+                            }}
+                            ref={(el) => {
+                              regRef(el)
+                              sqlTextareaRefs.current[0] = el
+                            }}
+                            {...regRest}
+                          />
+                          {jobVariables.length > 0 && (
+                            <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                              <span className="text-[10px] text-muted-foreground shrink-0">
+                                Insert:
+                              </span>
+                              {jobVariables.map((v) => (
+                                <button
+                                  key={v.id}
+                                  type="button"
+                                  title={v.description ?? `Insert {{${v.name}}}`}
+                                  onClick={() => insertVariable(v.name)}
+                                  className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-primary/10 hover:bg-primary/20 text-primary transition-colors cursor-pointer"
+                                >
+                                  {`{{${v.name}}}`}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()
                   )}
                 </div>
               </FormSection>
 
-              {/* ── Step 5: Destination (query type only — action modifies DB directly) */}
+              {/* ── Job Variables (query type, edit mode only) ─────────────── */}
               {jobType === 'query' && (
                 <FormSection
-                  step={isMulti ? 5 : 5}
+                  step={5}
+                  title="Job Variables"
+                  description="Define named checkpoints injected into SQL as {{name}}. Values update per-connection after each successful run."
+                >
+                  {jobId ? (
+                    <div className="flex flex-col gap-2">
+                      {/* ── Column mapping ────────────────────────────────── */}
+                      <div className="flex flex-col gap-1.5 rounded-lg border border-dashed px-3 py-2">
+                        {/* In multi-query mode show a query selector */}
+                        {isMulti && sqlQueries.length > 1 && (
+                          <div className="flex flex-wrap gap-1 pb-0.5">
+                            <span className="text-[10px] text-muted-foreground self-center shrink-0">
+                              Query:
+                            </span>
+                            {sqlQueries.map((_, qi) => {
+                              const qName = (getValues('sql_query_names') ?? [])[qi]?.trim()
+                              const label = qName || `Query ${qi + 1}`
+                              return (
+                                <button
+                                  key={qi}
+                                  type="button"
+                                  onClick={() => {
+                                    setPreviewQueryIndex(qi)
+                                    setPreviewCols([])
+                                    setPreviewFirstRow(null)
+                                    setPreviewError(null)
+                                  }}
+                                  className={cn(
+                                    'rounded border px-2 py-0.5 text-[10px] transition-all',
+                                    previewQueryIndex === qi
+                                      ? 'border-primary bg-primary/5 font-medium text-primary ring-1 ring-primary'
+                                      : 'border-border hover:border-muted-foreground/40'
+                                  )}
+                                >
+                                  {label}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[10px] font-medium">Column Mapping</p>
+                            <p className="text-[10px] text-muted-foreground">
+                              {previewCols.length > 0
+                                ? `${previewCols.length} columns found — click a column to map it as a variable`
+                                : 'Run query against a connection to discover available columns'}
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs shrink-0 gap-1"
+                            disabled={previewLoading}
+                            onClick={() => void fetchQueryColumns()}
+                          >
+                            <RefreshCw className={cn('size-3', previewLoading && 'animate-spin')} />
+                            {previewLoading
+                              ? 'Loading…'
+                              : previewCols.length > 0
+                                ? 'Refresh'
+                                : 'Load columns'}
+                          </Button>
+                        </div>
+                      </div>
+                      {previewError && (
+                        <p className="text-xs text-destructive px-1">{previewError}</p>
+                      )}
+                      {previewCols.length > 0 && (
+                        <div className="flex flex-wrap gap-1 px-1">
+                          {previewCols.map((col) => {
+                            const sampleVal = previewFirstRow
+                              ? String(previewFirstRow[col] ?? '')
+                              : ''
+                            return (
+                              <button
+                                key={col}
+                                type="button"
+                                title={sampleVal ? `First row value: ${sampleVal}` : col}
+                                onClick={() => {
+                                  setVarDraft((p) => ({
+                                    ...p,
+                                    name: p.name || col.replace(/\s/g, '_'),
+                                    source_column: col,
+                                    // only pre-fill default_value if it's currently empty
+                                    default_value: p.default_value || sampleVal,
+                                    auto_update: true
+                                  }))
+                                  if (!addingVar) setAddingVar(true)
+                                  setShowColPicker(false)
+                                }}
+                                className="font-mono text-[10px] px-1.5 py-0.5 rounded border bg-muted/50 hover:bg-primary/10 hover:border-primary/40 hover:text-primary transition-colors"
+                              >
+                                {col}
+                                {sampleVal && (
+                                  <span className="ml-1 text-muted-foreground non-mono">
+                                    ={' '}
+                                    {sampleVal.length > 12
+                                      ? sampleVal.slice(0, 12) + '…'
+                                      : sampleVal}
+                                  </span>
+                                )}
+                              </button>
+                            )
+                          })}
+                        </div>
+                      )}
+
+                      {/* Existing variables */}
+                      {jobVariables.length === 0 && !addingVar && (
+                        <p className="text-xs text-muted-foreground px-1">
+                          No variables yet. Add one to enable incremental sync.
+                        </p>
+                      )}
+                      {jobVariables.map((v) => (
+                        <div
+                          key={v.id}
+                          className="flex items-center gap-2 rounded-lg border px-3 py-2 text-xs"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <span className="font-mono font-semibold text-primary">
+                              {`{{${v.name}}}`}
+                            </span>
+                            {v.description && (
+                              <span className="ml-2 text-muted-foreground">{v.description}</span>
+                            )}
+                            <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5 text-muted-foreground">
+                              <span>
+                                default:{' '}
+                                <span className="font-mono">{v.default_value ?? '(none)'}</span>
+                              </span>
+                              {v.auto_update && v.source_column && (
+                                <span>
+                                  auto-update:{' '}
+                                  <span className="font-mono">
+                                    {v.update_fn}({v.source_column})
+                                  </span>
+                                </span>
+                              )}
+                              <span>
+                                {v.values.length} connection value{v.values.length !== 1 ? 's' : ''}
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await window.api.jobVariables.delete(v.id)
+                              void loadVariables()
+                            }}
+                            className="text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                          >
+                            <Trash2 className="size-3.5" />
+                          </button>
+                        </div>
+                      ))}
+
+                      {/* Add variable inline form */}
+                      {addingVar && (
+                        <div className="flex flex-col gap-2 rounded-lg border border-dashed px-3 py-3">
+                          {varError && <p className="text-xs text-destructive">{varError}</p>}
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <p className="text-[10px] text-muted-foreground mb-1">
+                                Name <span className="text-destructive">*</span>
+                              </p>
+                              <Input
+                                placeholder="last_sync"
+                                className="h-7 text-xs font-mono"
+                                value={varDraft.name}
+                                onChange={(e) =>
+                                  setVarDraft((p) => ({
+                                    ...p,
+                                    name: e.target.value.replace(/\s/g, '_')
+                                  }))
+                                }
+                              />
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-muted-foreground mb-1">
+                                Default value
+                              </p>
+                              <Input
+                                placeholder="0 or 2000-01-01"
+                                className="h-7 text-xs font-mono"
+                                value={varDraft.default_value}
+                                onChange={(e) =>
+                                  setVarDraft((p) => ({ ...p, default_value: e.target.value }))
+                                }
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-muted-foreground mb-1">
+                              Description (optional)
+                            </p>
+                            <Input
+                              placeholder="Last synced timestamp"
+                              className="h-7 text-xs"
+                              value={varDraft.description}
+                              onChange={(e) =>
+                                setVarDraft((p) => ({ ...p, description: e.target.value }))
+                              }
+                            />
+                          </div>
+                          <div className="flex items-center justify-between rounded border border-dashed px-2 py-1.5">
+                            <div>
+                              <p className="text-[10px] font-medium">Auto-update after run</p>
+                              <p className="text-[10px] text-muted-foreground">
+                                Track a column value per-connection
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={varDraft.auto_update}
+                              onClick={() =>
+                                setVarDraft((p) => ({ ...p, auto_update: !p.auto_update }))
+                              }
+                              className={cn(
+                                'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent',
+                                'transition-colors duration-200 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                                varDraft.auto_update ? 'bg-primary' : 'bg-input'
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  'pointer-events-none block size-4 rounded-full bg-background shadow ring-0 transition-transform duration-200',
+                                  varDraft.auto_update ? 'translate-x-4' : 'translate-x-0'
+                                )}
+                              />
+                            </button>
+                          </div>
+                          {varDraft.auto_update && (
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <p className="text-[10px] text-muted-foreground mb-1">
+                                  Source column
+                                  {previewCols.length > 0 && (
+                                    <span className="ml-1 text-primary">
+                                      (click a column chip above to fill)
+                                    </span>
+                                  )}
+                                </p>
+                                {previewCols.length > 0 ? (
+                                  <div className="relative">
+                                    <button
+                                      type="button"
+                                      onClick={() => setShowColPicker((p) => !p)}
+                                      className={cn(
+                                        'w-full h-7 text-xs font-mono text-left px-2 rounded-md border bg-background flex items-center justify-between gap-1',
+                                        'hover:border-primary/60 transition-colors',
+                                        varDraft.source_column
+                                          ? 'text-foreground'
+                                          : 'text-muted-foreground'
+                                      )}
+                                    >
+                                      <span>{varDraft.source_column || 'Pick a column…'}</span>
+                                      <span className="text-muted-foreground text-[10px]">▾</span>
+                                    </button>
+                                    {showColPicker && (
+                                      <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover shadow-md">
+                                        <div className="max-h-40 overflow-y-auto p-1 flex flex-col gap-0.5">
+                                          {previewCols.map((col) => (
+                                            <button
+                                              key={col}
+                                              type="button"
+                                              onClick={() => {
+                                                const sampleVal = previewFirstRow
+                                                  ? String(previewFirstRow[col] ?? '')
+                                                  : ''
+                                                setVarDraft((p) => ({
+                                                  ...p,
+                                                  name: p.name || col.replace(/\s/g, '_'),
+                                                  source_column: col,
+                                                  default_value: p.default_value || sampleVal
+                                                }))
+                                                setShowColPicker(false)
+                                              }}
+                                              className={cn(
+                                                'text-left px-2 py-1 text-xs font-mono rounded hover:bg-accent transition-colors w-full',
+                                                varDraft.source_column === col &&
+                                                  'bg-accent font-semibold'
+                                              )}
+                                            >
+                                              {col}
+                                              {previewFirstRow?.[col] != null && (
+                                                <span className="ml-2 text-muted-foreground font-normal">
+                                                  = {String(previewFirstRow[col]).slice(0, 20)}
+                                                </span>
+                                              )}
+                                            </button>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <Input
+                                    placeholder="PunchDatetime or TranId"
+                                    className="h-7 text-xs font-mono"
+                                    value={varDraft.source_column}
+                                    onChange={(e) =>
+                                      setVarDraft((p) => ({ ...p, source_column: e.target.value }))
+                                    }
+                                  />
+                                )}
+                              </div>
+                              <div>
+                                <p className="text-[10px] text-muted-foreground mb-1">
+                                  Update function
+                                </p>
+                                <SelectBox
+                                  options={[
+                                    { value: 'max', label: 'max — largest value' },
+                                    { value: 'min', label: 'min — smallest value' },
+                                    { value: 'last', label: 'last — final row' }
+                                  ]}
+                                  value={varDraft.update_fn}
+                                  onChange={(v) =>
+                                    setVarDraft((p) => ({
+                                      ...p,
+                                      update_fn: (v as 'max' | 'min' | 'last') ?? 'max'
+                                    }))
+                                  }
+                                />
+                              </div>
+                            </div>
+                          )}
+                          <div className="flex gap-2 mt-1">
+                            <Button
+                              type="button"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={async () => {
+                                if (!varDraft.name.trim()) {
+                                  setVarError('Variable name is required')
+                                  return
+                                }
+                                setVarError(null)
+                                try {
+                                  await window.api.jobVariables.create({
+                                    job_id: jobId!,
+                                    name: varDraft.name.trim(),
+                                    description: varDraft.description.trim() || null,
+                                    default_value: varDraft.default_value.trim() || null,
+                                    auto_update: varDraft.auto_update,
+                                    source_column: varDraft.auto_update
+                                      ? varDraft.source_column.trim() || null
+                                      : null,
+                                    update_fn: varDraft.update_fn
+                                  })
+                                  setAddingVar(false)
+                                  setVarDraft({
+                                    name: '',
+                                    description: '',
+                                    default_value: '',
+                                    auto_update: false,
+                                    source_column: '',
+                                    update_fn: 'max'
+                                  })
+                                  void loadVariables()
+                                } catch (err) {
+                                  setVarError(
+                                    err instanceof Error ? err.message : 'Failed to create variable'
+                                  )
+                                }
+                              }}
+                            >
+                              Save Variable
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => {
+                                setAddingVar(false)
+                                setVarError(null)
+                              }}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+
+                      {!addingVar && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="w-full h-7 text-xs mt-1"
+                          onClick={() => setAddingVar(true)}
+                        >
+                          <Plus className="size-3 mr-1" />
+                          Add Variable
+                        </Button>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground px-1">
+                      Save the job first, then re-open it to manage variables.
+                    </p>
+                  )}
+                </FormSection>
+              )}
+
+              {/* ── Step 6: Destination (query type only — action modifies DB directly) */}
+              {jobType === 'query' && (
+                <FormSection
+                  step={isMulti ? 6 : 6}
                   title="Destination"
                   description="Where should the query results be sent?"
                 >
@@ -1326,77 +1968,132 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
 
                     {/* Excel — native file/folder picker */}
                     {destType === 'excel' && (
-                      <Field>
-                        <FieldLabel>Output Path</FieldLabel>
-                        <div className="flex gap-2">
-                          <Input
-                            placeholder="/Reports/daily_sales.xlsx or /Reports/"
-                            className="font-mono text-xs"
-                            value={excelPath ?? ''}
-                            onChange={(e) => setValue('excel_path', e.target.value)}
+                      <div className="space-y-4">
+                        <Field>
+                          <FieldLabel>Output Path</FieldLabel>
+                          <div className="rounded-lg border bg-muted/20 px-3 py-2">
+                            <p className="font-mono text-xs break-all">
+                              {`<Desktop>/Job_Output/${(jobNameInput ?? 'job').trim().replace(/[^a-zA-Z0-9._-]+/g, '_') || 'job'}/`}
+                            </p>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Auto-managed by Bridge. No manual file/folder selection needed.
+                          </p>
+                        </Field>
+
+                        <Field>
+                          <FieldLabel>Excel Template (Optional)</FieldLabel>
+                          <FileUploader
+                            destination={`jobs/excel-templates/${(jobNameInput ?? 'job').trim().replace(/[^a-zA-Z0-9._-]+/g, '_') || 'job'}`}
+                            accept=".xlsx"
+                            maxSizeMB={100}
+                            onUploadComplete={(url) => {
+                              setValue('template_path', url, { shouldDirty: true })
+                              setValue('template_mode', 'existing', { shouldDirty: true })
+                              setValue('operation', 'replace', { shouldDirty: true })
+                            }}
                           />
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon"
-                            title="Select existing file (append / replace)"
-                            onClick={async () => {
-                              const path = await window.api.dialog.openFile({
-                                title: 'Select Excel File',
-                                filters: [{ name: 'Excel', extensions: ['xlsx', 'xls', 'csv'] }]
-                              })
-                              if (path) setValue('excel_path', path)
-                            }}
-                          >
-                            <FileText className="size-4" />
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon"
-                            title="Select folder — creates new file each run"
-                            onClick={async () => {
-                              const folder = await window.api.dialog.openFolder({
-                                title: 'Select Output Folder'
-                              })
-                              if (folder) setValue('excel_path', folder)
-                            }}
-                          >
-                            <FolderOpen className="size-4" />
-                          </Button>
-                        </div>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          <strong>File:</strong> Update that file (append/replace).{' '}
-                          <strong>Folder:</strong> New file each run named{' '}
-                          <code>{'{job}_{timestamp}.xlsx'}</code>
-                        </p>
-                      </Field>
+                          {templatePath && (
+                            <div className="mt-2 flex items-center gap-2">
+                              <Badge variant="secondary">Template configured</Badge>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setValue('template_path', null, { shouldDirty: true })
+                                  setValue('template_mode', null, { shouldDirty: true })
+                                }}
+                              >
+                                Remove template
+                              </Button>
+                            </div>
+                          )}
+                        </Field>
+
+                        {/* Summary sheet extra columns */}
+                        <Field>
+                          <FieldLabel>Summary Sheet Extra Columns</FieldLabel>
+                          <p className="text-xs text-muted-foreground mb-2">
+                            Select which connection metadata to add after the &quot;Sheet Name&quot;
+                            column in the Summary sheet.
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {(
+                              [
+                                { key: 'group_name', label: 'Group Name' },
+                                { key: 'store_name', label: 'Store Name' },
+                                { key: 'fiscal_year_name', label: 'Fiscal Year' },
+                                { key: 'static_ip', label: 'Static IP' },
+                                { key: 'vpn_ip', label: 'VPN IP' },
+                                { key: 'db_name', label: 'Database Name' }
+                              ] as const
+                            ).map(({ key, label }) => {
+                              const selected = summaryExtraCols.includes(key)
+                              return (
+                                <button
+                                  key={key}
+                                  type="button"
+                                  onClick={() => {
+                                    const next = selected
+                                      ? summaryExtraCols.filter((c) => c !== key)
+                                      : [...summaryExtraCols, key]
+                                    setValue('summary_extra_columns', next.length ? next : null, {
+                                      shouldDirty: true
+                                    })
+                                  }}
+                                  className={cn(
+                                    'rounded-md border px-2.5 py-1 text-xs transition-all',
+                                    selected
+                                      ? 'border-primary bg-primary/5 ring-1 ring-primary font-medium'
+                                      : 'border-border hover:border-muted-foreground/40'
+                                  )}
+                                >
+                                  {label}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </Field>
+
+                        {/* Combine sheets — single-query only */}
+                        {!isMulti && (
+                          <div className="flex items-center justify-between rounded-lg border border-dashed px-3 py-2">
+                            <div>
+                              <p className="text-xs font-medium">Combine into one sheet</p>
+                              <p className="text-xs text-muted-foreground">
+                                Stack all connections in a single &quot;Data&quot; sheet with
+                                section headers
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={excelCombineSheets}
+                              onClick={() =>
+                                setValue('excel_combine_sheets', !excelCombineSheets, {
+                                  shouldDirty: true
+                                })
+                              }
+                              className={cn(
+                                'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent',
+                                'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                                excelCombineSheets ? 'bg-primary' : 'bg-input'
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  'pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform',
+                                  excelCombineSheets ? 'translate-x-4' : 'translate-x-0'
+                                )}
+                              />
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
 
-                    {/* Write mode — only for file-based excel or google sheets with URL */}
-                    {destType === 'excel' && excelPath && /\.(xlsx|xls|csv)$/i.test(excelPath) && (
-                      <Field>
-                        <FieldLabel>Write Mode</FieldLabel>
-                        <SelectBox
-                          options={[
-                            { value: 'append', label: 'Append — add rows to existing data' },
-                            { value: 'replace', label: 'Replace — overwrite all existing data' }
-                          ]}
-                          value={operation ?? undefined}
-                          onChange={(v) =>
-                            setValue('operation', (v as 'append' | 'replace') ?? null)
-                          }
-                          placeholder="Choose write mode…"
-                          clearable
-                        />
-                      </Field>
-                    )}
-
-                    {/*
-                      Excel template field removed: the Destination Path IS the
-                      template when it points to an existing .xlsx. The combiner
-                      will rewrite INTO that file instead of creating a new one.
-                    */}
+                    {/* Excel mode is always replace in machine-local job folder. */}
 
                     {destType === 'google_sheets' && sheetIdInput && (
                       <Field>
@@ -1624,9 +2321,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                 </FormSection>
               )}
 
-              {/* ── Step 6: Schedule ───────────────────────────────────────────── */}
+              {/* ── Step 7: Schedule ───────────────────────────────────────────── */}
               <FormSection
-                step={jobType === 'action' ? 7 : 6}
+                step={jobType === 'action' ? 7 : 7}
                 title="Schedule"
                 description="Configure when this job should run automatically"
               >
