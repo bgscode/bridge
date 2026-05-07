@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, Menu, type MenuItemConstructorOptions } from 'electron'
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import { createMainWindow } from './window'
 import { bindWindowIpc, registerAllIpc } from './ipc'
@@ -7,6 +7,67 @@ import {
   stopConnectionMonitor
 } from './services/connection/connection-monitor'
 import { startScheduler, stopScheduler } from './services/job/job-scheduler'
+
+function configureApplicationMenu(): void {
+  if (process.platform !== 'darwin') return
+
+  const viewSubmenu: MenuItemConstructorOptions[] = []
+  if (!app.isPackaged) {
+    viewSubmenu.push(
+      { role: 'reload' },
+      { role: 'forceReload' },
+      { role: 'toggleDevTools' },
+      { type: 'separator' }
+    )
+  }
+
+  viewSubmenu.push(
+    { role: 'resetZoom' },
+    { role: 'zoomIn' },
+    { role: 'zoomOut' },
+    { type: 'separator' },
+    { role: 'togglefullscreen' }
+  )
+
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' }
+      ]
+    },
+    {
+      label: 'View',
+      submenu: viewSubmenu
+    },
+    {
+      label: 'Window',
+      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+    }
+  ]
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
 
 function createAndWireMainWindow(): BrowserWindow {
   const mainWindow = createMainWindow()
@@ -51,6 +112,7 @@ export async function bootstrap(): Promise<void> {
   })
 
   registerAllIpc()
+  configureApplicationMenu()
   createAndWireMainWindow()
 
   app.on('before-quit', () => {
