@@ -3,7 +3,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { cn } from '@/lib/utils'
-import { CheckCircle2, Loader2, UploadCloud } from 'lucide-react'
+import { CheckCircle2, ExternalLink, FileIcon, Loader2, UploadCloud } from 'lucide-react'
 import { toast } from 'sonner'
 import { getToken } from '@/lib/api'
 
@@ -49,6 +49,8 @@ type FileUploaderProps = {
   onUploadComplete: (url: string) => void
   accept?: string
   maxSizeMB?: number
+  /** Pre-existing URL (e.g. when editing a saved job). Shows filename + link. */
+  initialUrl?: string | null
 }
 
 function getApiBaseUrl(): string {
@@ -74,7 +76,8 @@ export function FileUploader({
   destination,
   onUploadComplete,
   accept = '*/*',
-  maxSizeMB = 100
+  maxSizeMB = 100,
+  initialUrl = null
 }: FileUploaderProps): JSX.Element {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const xhrRef = useRef<XMLHttpRequest | null>(null)
@@ -344,6 +347,25 @@ export function FileUploader({
                   {selectedFile.name}
                 </p>
                 <p className="text-xs text-muted-foreground">{formatFileSize(selectedFile.size)}</p>
+              </div>
+            ) : initialUrl ? (
+              <div className="mt-3 rounded-lg border bg-background/80 px-3 py-2 text-sm flex items-center gap-2">
+                <FileIcon className="size-4 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium text-xs" title={initialUrl}>
+                    {initialUrl.split('/').pop() ?? initialUrl}
+                  </p>
+                  <a
+                    href={initialUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs text-primary underline-offset-2 hover:underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <ExternalLink className="size-3" />
+                    Open file
+                  </a>
+                </div>
               </div>
             ) : (
               <p className="mt-3 text-sm text-muted-foreground">No file selected yet.</p>

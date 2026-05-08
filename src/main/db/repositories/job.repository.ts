@@ -17,6 +17,7 @@ interface RawJobRow extends Omit<
   | 'summary_extra_columns'
   | 'excel_combine_sheets'
   | 'last_failed_connection_ids'
+  | 'last_connection_errors'
 > {
   connection_ids: string
   sql_query: string
@@ -25,6 +26,7 @@ interface RawJobRow extends Omit<
   online_only: number
   modify_dates: number
   last_failed_connection_ids: string | null
+  last_connection_errors: string | null
   summary_extra_columns: string | null
   excel_combine_sheets: number
 }
@@ -39,6 +41,7 @@ function parseRow(raw: RawJobRow): JobRow {
     online_only: Boolean(raw.online_only),
     modify_dates: raw.modify_dates === undefined ? true : Boolean(raw.modify_dates),
     last_failed_connection_ids: JSON.parse(raw.last_failed_connection_ids || '[]'),
+    last_connection_errors: JSON.parse(raw.last_connection_errors || '[]'),
     summary_extra_columns: raw.summary_extra_columns ? JSON.parse(raw.summary_extra_columns) : null,
     excel_combine_sheets: Boolean(raw.excel_combine_sheets)
   }
@@ -94,6 +97,7 @@ const KNOWN_COLUMNS = new Set([
   'last_run_at',
   'last_error',
   'last_failed_connection_ids',
+  'last_connection_errors',
   'summary_extra_columns',
   'excel_combine_sheets'
 ])
@@ -104,6 +108,8 @@ function serializeForUpdate(data: Record<string, unknown>): Record<string, unkno
     if (value === undefined) continue
     if (!KNOWN_COLUMNS.has(key)) continue
     if (key === 'connection_ids' || key === 'last_failed_connection_ids') {
+      out[key] = JSON.stringify(value ?? [])
+    } else if (key === 'last_connection_errors') {
       out[key] = JSON.stringify(value ?? [])
     } else if (key === 'sql_query' || key === 'sql_query_names') {
       out[key] = JSON.stringify(value)

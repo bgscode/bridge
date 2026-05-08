@@ -12,7 +12,8 @@ import {
   CalendarRange,
   CalendarClock,
   Settings,
-  BriefcaseBusiness
+  BriefcaseBusiness,
+  AlertTriangle
 } from 'lucide-react'
 
 // Lazy load pages — add new pages here, they auto-register in sidebar + router
@@ -29,6 +30,7 @@ const SettingsPage = lazy(() => import('@/pages/settings'))
 const JobsPage = lazy(() => import('@/pages/jobs'))
 const JobGroupPage = lazy(() => import('@/pages/job-group'))
 const SchedulePage = lazy(() => import('@/pages/schedule'))
+const JobErrorLogPage = lazy(() => import('@/pages/job-error-log'))
 
 export type UserRole = 'admin' | 'user'
 
@@ -107,6 +109,15 @@ export const routes: RouteConfig[] = [
     label: 'Jobs',
     icon: <BriefcaseBusiness className="size-4" />,
     element: <JobsPage />,
+    showInSidebar: true,
+    group: 'main',
+    roles: USER_VISIBLE
+  },
+  {
+    path: '/job-error-log',
+    label: 'Error Log',
+    icon: <AlertTriangle className="size-4" />,
+    element: <JobErrorLogPage />,
     showInSidebar: true,
     group: 'main',
     roles: USER_VISIBLE

@@ -851,18 +851,19 @@ function injectVariables(
     }
   >
 ): string {
-  return sql.replace(/\{\{([^}]+)\}\}/g, (match, name: string) => {
+  return sql.replace(/\{\{([^}]+)\}\}/g, (_match, name: string) => {
     const trimmed = name.trim()
     // Stored per-connection value takes priority
     if (trimmed in connVars) return connVars[trimmed]
     // Fall back to the variable's default_value
     const meta = varMeta.get(trimmed)
     if (meta?.defaultValue != null) return meta.defaultValue
-    // Nothing found — leave placeholder (will cause a SQL error that the user can debug)
-    console.warn(
-      `[job-executor] Variable {{${trimmed}}} has no value or default — left as placeholder`
+    // Nothing found — throw a clear error instead of leaving {{var}} in SQL
+    // (SQL Server would reject the { character with a confusing syntax error)
+    throw new Error(
+      `SQL variable {{${trimmed}}} has no configured value and no default. ` +
+        `Please set a value in Jobs → Variables for this connection, or add a default value.`
     )
-    return match
   })
 }
 
@@ -1373,6 +1374,7 @@ async function writeInPlaceExcelReplace(
 
 async function writeStreamingExcelCombined(
   destPath: string,
+  operation: 'append' | 'replace' | null,
   jobName: string,
   progress: JobProgress,
   connections: ConnectionRow[],
@@ -1393,10 +1395,45 @@ async function writeStreamingExcelCombined(
     filePath = path.join(baseDir, parsed.base)
   }
 
+  // ── Load existing workbook (replace mode) ────────────────────────────────
+  // When replace is requested and the file already exists, load it so that
+  // any user-added sheets (reports, formula tabs, charts …) are preserved.
+  // Only the "Data" sheet, individual bucket sheets and the Summary are
+  // removed and rewritten. If the file is too large or corrupt we fall back
+  // to a fresh workbook.
   const workbook = new ExcelJS.Workbook()
-  const dataSheet = workbook.addWorksheet('Data')
+  const fileExists = fs.existsSync(filePath)
+  const buckets = listOutputBuckets(connections, allChunkFiles, [], new Map())
+  const bucketPatterns = bucketSheetNamePatterns(buckets)
 
-  let globalHeaders: string[] = []
+  if (operation === 'replace' && fileExists) {
+    try {
+      const { size } = fs.statSync(filePath)
+      if (size <= MAX_IN_PLACE_WORKBOOK_BYTES) {
+        await workbook.xlsx.readFile(filePath)
+      }
+    } catch {
+      // Couldn't read — proceed with empty workbook
+    }
+    // Remove old "Data" sheet, individual bucket sheets, and Summary
+    const toRemove: number[] = []
+    workbook.eachSheet((ws) => {
+      if (
+        ws.name === 'Data' ||
+        ws.name.toLowerCase() === 'summary' ||
+        isBucketSheetName(ws.name, bucketPatterns)
+      ) {
+        toRemove.push(ws.id)
+      }
+    })
+    for (const id of toRemove) {
+      const ws = workbook.getWorksheet(id)
+      if (ws) workbook.removeWorksheet(ws.id)
+    }
+  }
+
+  // ── Combined "Data" sheet (all connections, Sheet Name as first column) ──
+  const dataSheet = workbook.addWorksheet('Data')
   let globalHeadersSet = false
 
   for (const conn of connections) {
@@ -1404,44 +1441,101 @@ async function writeStreamingExcelCombined(
     const chunkFiles = allChunkFiles.get(chunkTag) ?? []
     if (chunkFiles.length === 0) continue
 
-    let connSectionStarted = false
-    let connHasData = false
+    const sheetName = resolveConnectionLabel(conn)
 
     for (const chunkFile of chunkFiles) {
       await streamChunkRows(chunkFile, (row) => {
         const fmtRow = formatQueryRow(row, modifyDates)
-        const values = Object.values(fmtRow) as unknown[]
         const rowKeys = Object.keys(fmtRow)
+        const values = Object.values(fmtRow) as unknown[]
 
-        // Discover column headers from first data row
+        // Write ONE styled header row at the very top — first column is "Sheet Name"
         if (!globalHeadersSet) {
-          globalHeaders = rowKeys
-          dataSheet.columns = globalHeaders.map((h) => ({
-            width: Math.max(18, Math.min(40, h.length + 4))
+          const allHeaders = ['Sheet Name', ...rowKeys]
+          dataSheet.columns = allHeaders.map((h, i) => ({
+            width:
+              i === 0
+                ? Math.max(20, sheetName.length + 4)
+                : Math.max(18, Math.min(40, h.length + 4))
           }))
+          const headerRow = dataSheet.addRow(allHeaders)
+          headerRow.height = 22
+          const headerColor = 'FF0284C7'
+          headerRow.eachCell({ includeEmpty: false }, (cell, colNum) => {
+            if (colNum > allHeaders.length) return
+            cell.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 }
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: headerColor } }
+            cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }
+            cell.border = {
+              top: { style: 'thin', color: { argb: 'FFBBD8E8' } },
+              left: { style: 'thin', color: { argb: 'FFBBD8E8' } },
+              bottom: { style: 'thin', color: { argb: 'FFBBD8E8' } },
+              right: { style: 'thin', color: { argb: 'FFBBD8E8' } }
+            }
+          })
           globalHeadersSet = true
         }
 
-        // Write connection section header + column headers before first data row
-        if (!connSectionStarted) {
-          const connHeaderRow = dataSheet.addRow([conn.name])
-          connHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 }
-          connHeaderRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F766E' } }
-
-          const colHeaderRow = dataSheet.addRow(globalHeaders)
-          colHeaderRow.font = { bold: true }
-          colHeaderRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } }
-
-          connSectionStarted = true
-        }
-
-        dataSheet.addRow(values)
-        connHasData = true
+        // Sheet Name is the first value in every data row
+        dataSheet.addRow([sheetName, ...values])
       })
     }
+  }
 
-    if (connHasData) {
-      dataSheet.addRow([]) // blank separator between connection sections
+  // ── Individual per-connection sheets (same as normal Excel mode) ─────────
+  const threshold = resolveSheetRowThreshold()
+  const taken = new Set<string>(['data', 'summary'])
+  for (const ws of workbook.worksheets) taken.add(ws.name.toLowerCase())
+
+  for (const bucket of buckets) {
+    const baseSheetName = sanitizeSheetName(bucket.label)
+    const willSplit = bucket.rows > threshold
+    const name = nextRolloverSheetName(baseSheetName, 0, taken, willSplit)
+    let sheet = workbook.addWorksheet(name)
+    taken.add(name.toLowerCase())
+    let rolloverIndex = 0
+    let headers: string[] = []
+    let headersSet = false
+    let rowsInSheet = 0
+
+    if (bucket.chunkFiles.length === 0) {
+      if (bucket.columns.length > 0) {
+        headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
+        sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+      } else {
+        sheet.columns = [{ header: 'No rows found', key: 'msg', width: 30 }]
+      }
+      if (bucket.error) {
+        const cells: Record<string, unknown> = {}
+        for (const c of bucket.columns) cells[c] = ''
+        cells['Error'] = bucket.error
+        sheet.addRow(cells)
+      } else if (!bucket.columns.length) {
+        sheet.addRow({ msg: 'No rows found' })
+      }
+      continue
+    }
+
+    for (const chunkFile of bucket.chunkFiles) {
+      await streamChunkRows(chunkFile, (row) => {
+        const fmtRow = formatQueryRow(row, modifyDates)
+        if (!headersSet) {
+          headers = Object.keys(fmtRow)
+          sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+          headersSet = true
+          rowsInSheet = 1
+        }
+        if (rowsInSheet >= threshold) {
+          rolloverIndex++
+          const nextName = nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
+          sheet = workbook.addWorksheet(nextName)
+          taken.add(nextName.toLowerCase())
+          sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+          rowsInSheet = 1
+        }
+        sheet.addRow(fmtRow)
+        rowsInSheet++
+      })
     }
   }
 
@@ -2638,7 +2732,8 @@ async function writeStreamingCsv(
 async function sendToApiStreaming(
   configJson: string,
   connections: ConnectionRow[],
-  allChunkFiles: Map<string, string[]>
+  allChunkFiles: Map<string, string[]>,
+  onConnectionSuccess?: (connId: number) => Promise<void>
 ): Promise<void> {
   const config = JSON.parse(configJson) as {
     endpoint: string
@@ -2652,10 +2747,60 @@ async function sendToApiStreaming(
 
   let headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (config.headers) {
+    const rawHeaders = config.headers.trim()
+    let parsed: Record<string, string> | null = null
+
+    // Attempt 1: parse as-is (valid JSON object)
     try {
-      headers = { ...headers, ...JSON.parse(config.headers) }
+      const p = JSON.parse(rawHeaders)
+      if (p && typeof p === 'object' && !Array.isArray(p)) parsed = p
     } catch {
-      // Invalid headers JSON
+      // ignore
+    }
+
+    // Attempt 2: wrap in {} in case user omitted outer braces
+    // e.g.  "x-machine-sync-token": "abc"
+    if (!parsed) {
+      try {
+        const p = JSON.parse(`{${rawHeaders}}`)
+        if (p && typeof p === 'object' && !Array.isArray(p)) parsed = p
+      } catch {
+        // ignore
+      }
+    }
+
+    // Attempt 3: Key: Value line-by-line (strip surrounding quotes from both key and val)
+    if (!parsed) {
+      const extra: Record<string, string> = {}
+      for (const line of rawHeaders.split('\n')) {
+        const colonIdx = line.indexOf(':')
+        if (colonIdx > 0) {
+          const key = line
+            .slice(0, colonIdx)
+            .trim()
+            .replace(/^["']|["']$/g, '')
+          const val = line
+            .slice(colonIdx + 1)
+            .trim()
+            .replace(/^["']|["']$/g, '')
+            .replace(/,\s*$/, '')
+          if (key && val) extra[key] = val
+        }
+      }
+      if (Object.keys(extra).length > 0) parsed = extra
+    }
+
+    if (parsed) {
+      // Strip any remaining quotes from keys (safety net for all parse paths)
+      const clean: Record<string, string> = {}
+      for (const [k, v] of Object.entries(parsed)) {
+        const cleanKey = k.trim().replace(/^["']|["']$/g, '')
+        const cleanVal = String(v)
+          .trim()
+          .replace(/^["']|["']$/g, '')
+        if (cleanKey) clean[cleanKey] = cleanVal
+      }
+      headers = { ...headers, ...clean }
     }
   }
 
@@ -2678,6 +2823,13 @@ async function sendToApiStreaming(
 
     if (batch.length > 0) {
       await sendBatch(url, method, headers, conn, batch)
+    }
+
+    // All batches for this connection sent successfully — fire the callback
+    // so the caller can update variables now that data has actually reached
+    // the destination.
+    if (onConnectionSuccess) {
+      await onConnectionSuccess(conn.id).catch(() => {})
     }
   }
 }
@@ -2703,8 +2855,24 @@ async function sendBatch(
   })
 
   if (!res.ok) {
+    // Try to read the response body for a more descriptive error message
+    let bodyText = ''
+    try {
+      bodyText = await res.text()
+      // If body is JSON, try to extract a message field
+      const bodyJson = JSON.parse(bodyText) as Record<string, unknown>
+      const msg =
+        (bodyJson.message as string) ||
+        (bodyJson.error as string) ||
+        (bodyJson.msg as string) ||
+        (bodyJson.detail as string)
+      if (msg) bodyText = msg
+    } catch {
+      // bodyText stays as raw text or empty
+    }
+    const detail = bodyText ? ` — ${bodyText.slice(0, 300)}` : ''
     throw new Error(
-      `API ${method} ${url} failed for "${conn.name}": ${res.status} ${res.statusText}`
+      `API ${method} ${url} failed for "${conn.name}": ${res.status} ${res.statusText}${detail}`
     )
   }
 }
@@ -3084,7 +3252,13 @@ export async function runJob(
           // ── Auto-update job variables after a successful connection run ──
           // Only when no error and not cancelled. We skip failed connections
           // so they retry from their last safe checkpoint value.
-          if (jobVarMeta.size > 0 && aggregateChunkFiles.length > 0) {
+          // For API destination, variable updates are deferred to the
+          // onConnectionSuccess callback (fired after data is confirmed delivered).
+          if (
+            job.destination_type !== 'api' &&
+            jobVarMeta.size > 0 &&
+            aggregateChunkFiles.length > 0
+          ) {
             for (const [varName, meta] of jobVarMeta) {
               if (!meta.autoUpdate || !meta.sourceColumn) continue
               // Collect all chunk files for this connection across all plan steps
@@ -3255,6 +3429,7 @@ export async function runJob(
           job.excel_combine_sheets && !isMultiQuery
             ? await writeStreamingExcelCombined(
                 destPath,
+                job.operation,
                 job.name,
                 progress,
                 connections,
@@ -3281,7 +3456,56 @@ export async function runJob(
 
         progress.output_path = actualPath
       } else if (job.destination_type === 'api') {
-        await sendToApiStreaming(effectiveDestinationConfig as string, connections, allChunkFiles)
+        await sendToApiStreaming(
+          effectiveDestinationConfig as string,
+          connections,
+          allChunkFiles,
+          // Per-connection success callback: update variables only after data
+          // has actually been delivered to the API endpoint.
+          jobVarMeta.size > 0
+            ? async (connId: number) => {
+                const conn = connections.find((c) => c.id === connId)
+                if (!conn) return
+                const connChunkFiles: string[] = []
+                for (const [tag, files] of allChunkFiles) {
+                  const { connId: tid } = parseChunkTag(tag)
+                  if (tid === connId) connChunkFiles.push(...files)
+                }
+                if (connChunkFiles.length === 0) return
+                for (const [varName, meta] of jobVarMeta) {
+                  if (!meta.autoUpdate || !meta.sourceColumn) continue
+                  try {
+                    let best: string | null = null
+                    const col = meta.sourceColumn
+                    for (const chunkFile of connChunkFiles) {
+                      const rows = await readChunkFromFile(chunkFile)
+                      for (const row of rows) {
+                        const raw = row[col]
+                        if (raw === null || raw === undefined) continue
+                        const str = raw instanceof Date ? raw.toISOString() : String(raw)
+                        if (best === null) best = str
+                        else if (meta.updateFn === 'max' && str > best) best = str
+                        else if (meta.updateFn === 'min' && str < best) best = str
+                        else if (meta.updateFn === 'last') best = str
+                      }
+                    }
+                    if (best !== null) {
+                      jobVariableRepository.upsertValue(meta.id, connId, best)
+                      await mirrorJobVariableSetValue(meta.id, connId, best)
+                      const updated = connVarMap.get(connId) ?? {}
+                      updated[varName] = best
+                      connVarMap.set(connId, updated)
+                    }
+                  } catch (varErr) {
+                    console.warn(
+                      `[job-executor] API: Failed to update variable "${varName}" for connection ${connId}:`,
+                      varErr
+                    )
+                  }
+                }
+              }
+            : undefined
+        )
       } else if (job.destination_type === 'google_sheets') {
         if (progress.adaptive) {
           progress.adaptive.reason = 'writing google sheets output'
@@ -3303,6 +3527,8 @@ export async function runJob(
             chunkFiles: b.chunkFiles
           })),
           readChunk: readChunkFromFile,
+          combineSheets: job.excel_combine_sheets && !isMultiQuery,
+          jobProgress: progress,
           onProgress: ({ bucket, rowsWritten, totalRowsForBucket }) => {
             if (progress.adaptive) {
               const pct =
@@ -3353,6 +3579,11 @@ export async function runJob(
     .filter((c) => c.status === 'error' || c.status === 'pending')
     .map((c) => c.connection_id)
 
+  // Build per-connection error map for detailed error log
+  const connectionErrors = progress.connections
+    .filter((c) => c.status === 'error' && c.error)
+    .map((c) => ({ id: c.connection_id, name: c.connection_name, error: c.error! }))
+
   const dbStatus = progress.status
   jobRepository.update(jobId, {
     status: dbStatus,
@@ -3362,7 +3593,8 @@ export async function runJob(
       (progress.failed_connections > 0
         ? `${progress.failed_connections}/${progress.total_connections} connection(s) failed`
         : null),
-    last_failed_connection_ids: failedOrPendingIds
+    last_failed_connection_ids: failedOrPendingIds,
+    last_connection_errors: connectionErrors
   } as Partial<JobRow>)
 
   throttled.flush(progress)

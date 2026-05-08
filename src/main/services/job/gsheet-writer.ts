@@ -16,6 +16,7 @@
 import fs from 'fs'
 import { google, type sheets_v4 } from 'googleapis'
 import type { JWT } from 'google-auth-library'
+import type { JobProgress } from '@shared/index'
 
 /** Max values batch sent in a single `values.append` request. */
 const ROWS_PER_BATCH = 5_000
@@ -37,6 +38,8 @@ export interface GoogleSheetsConfig {
   /** Service-account JSON credentials, either parsed or stringified. */
   service_account_json?: string | Record<string, unknown>
   credentials_json?: string | Record<string, unknown>
+  /** Alias used by the renderer form. */
+  credentials?: string | Record<string, unknown>
 }
 
 export interface GsheetBucket {
@@ -58,6 +61,13 @@ export interface WriteToGoogleSheetsOptions {
   readChunk: (filePath: string) => Promise<Record<string, unknown>[]>
   /** Optional progress reporter — fires after each successful append batch. */
   onProgress?: (info: { bucket: string; rowsWritten: number; totalRowsForBucket: number }) => void
+  /**
+   * When true, write a combined "Data" tab (Sheet Name as first column, all
+   * connections merged) and a "Summary" tab — same behaviour as Excel combine mode.
+   */
+  combineSheets?: boolean
+  /** Job progress snapshot used to populate the Summary tab. */
+  jobProgress?: JobProgress
 }
 
 // ─── Public entry point ──────────────────────────────────────────────────────
@@ -95,7 +105,18 @@ export async function writeToGoogleSheets(opts: WriteToGoogleSheetsOptions): Pro
   const tabsToClear: string[] = []
 
   for (const bucket of opts.buckets) {
-    const tabName = uniqueTabName(bucket.label, taken)
+    // If a tab with this label already exists (case-insensitive), reuse its exact
+    // name so we don't accumulate _2/_3/_4 suffixes on repeated runs.
+    const sanitized =
+      (bucket.label || 'Sheet1')
+        .replace(/[:/\\?*[\]]/g, '_')
+        .slice(0, 100)
+        .trim() || 'Sheet1'
+    const existingMatch = [...existingTabs.keys()].find(
+      (t) => t.toLowerCase() === sanitized.toLowerCase()
+    )
+    const tabName = existingMatch ?? uniqueTabName(bucket.label, taken)
+    if (existingMatch && !taken.has(existingMatch)) taken.add(existingMatch)
     targets.push({ bucket, tabName })
 
     if (!existingTabs.has(tabName)) {
@@ -105,8 +126,13 @@ export async function writeToGoogleSheets(opts: WriteToGoogleSheetsOptions): Pro
     }
   }
 
+  // tabSheetIds: name → sheetId (needed to resize grid before writing)
+  // newlyCreatedTabs: only tabs we just created — existing tabs keep their current grid size
+  const tabSheetIds = new Map<string, number>(existingTabs)
+  const newlyCreatedTabNames = new Set<string>()
+
   if (tabsToCreate.length > 0) {
-    await callWithRetry(() =>
+    const createResp = await callWithRetry(() =>
       sheets.spreadsheets.batchUpdate({
         spreadsheetId,
         requestBody: {
@@ -114,6 +140,42 @@ export async function writeToGoogleSheets(opts: WriteToGoogleSheetsOptions): Pro
             addSheet: { properties: { title: t.title } }
           }))
         }
+      })
+    )
+    // Capture sheetIds of newly created tabs so we can resize them.
+    for (let i = 0; i < tabsToCreate.length; i++) {
+      const props = createResp.data.replies?.[i]?.addSheet?.properties
+      if (props?.title && typeof props.sheetId === 'number') {
+        tabSheetIds.set(props.title, props.sheetId)
+        newlyCreatedTabNames.add(props.title)
+      }
+    }
+  }
+
+  // Resize ALL target tabs to their actual needed column count.
+  // - New tabs default to 26 cols → too few for wide queries.
+  // - Existing cleared tabs may also still have only 26 cols.
+  // - We use bucket.columns.length (always populated) so we never over-allocate.
+  //   e.g. 18 tabs × 50 cols × 1000 rows = 900K cells — well under 10M limit.
+  const resizeRequests = targets
+    .map(({ tabName, bucket }) => {
+      const sheetId = tabSheetIds.get(tabName)
+      if (sheetId == null) return null
+      const colsNeeded = Math.max(bucket.columns.length + 2, 26)
+      return {
+        updateSheetProperties: {
+          properties: { sheetId, gridProperties: { columnCount: colsNeeded } },
+          fields: 'gridProperties.columnCount'
+        }
+      }
+    })
+    .filter((r): r is NonNullable<typeof r> => r != null)
+
+  if (resizeRequests.length > 0) {
+    await callWithRetry(() =>
+      sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: resizeRequests }
       })
     )
   }
@@ -134,6 +196,109 @@ export async function writeToGoogleSheets(opts: WriteToGoogleSheetsOptions): Pro
   // Stream rows into each target tab.
   for (const { bucket, tabName } of targets) {
     await writeBucketToTab(sheets, spreadsheetId, tabName, bucket, opts)
+  }
+
+  // ── Combined "Data" tab ────────────────────────────────────────────────────
+  // When combine mode is enabled, write a single tab that merges all buckets
+  // with "Sheet Name" as the first column — mirrors Excel combine behaviour.
+  if (opts.combineSheets && opts.buckets.length > 0) {
+    const dataTabName = 'Data'
+    // Clear or create the Data tab.
+    if (existingTabs.has(dataTabName)) {
+      await callWithRetry(() =>
+        sheets.spreadsheets.values.batchClear({
+          spreadsheetId,
+          requestBody: { ranges: [dataTabName] }
+        })
+      )
+    } else {
+      await callWithRetry(() =>
+        sheets.spreadsheets.batchUpdate({
+          spreadsheetId,
+          requestBody: { requests: [{ addSheet: { properties: { title: dataTabName } } }] }
+        })
+      )
+    }
+
+    let dataHeaders: string[] | null = null
+    let dataPending: unknown[][] = []
+
+    for (const bucket of opts.buckets) {
+      if (bucket.chunkFiles.length === 0) continue
+      const sheetLabel = bucket.label
+
+      for (const chunkFile of bucket.chunkFiles) {
+        const rows = await opts.readChunk(chunkFile)
+        if (rows.length === 0) continue
+
+        if (!dataHeaders) {
+          dataHeaders = ['Sheet Name', ...Object.keys(rows[0])]
+          dataPending.push(dataHeaders)
+        }
+
+        for (const row of rows) {
+          const keys = dataHeaders.slice(1)
+          dataPending.push([
+            sheetLabel,
+            ...keys.map((k) => normalizeCell((row as Record<string, unknown>)[k]))
+          ])
+          if (dataPending.length >= ROWS_PER_BATCH) {
+            await appendBatch(sheets, spreadsheetId, dataTabName, dataPending)
+            dataPending = []
+          }
+        }
+      }
+    }
+    if (dataPending.length > 0) {
+      await appendBatch(sheets, spreadsheetId, dataTabName, dataPending)
+    }
+  }
+
+  // ── "Summary" tab ─────────────────────────────────────────────────────────
+  // Always written when combineSheets is on (same as Excel combine mode).
+  if (opts.combineSheets && opts.jobProgress) {
+    const summaryTabName = 'Summary'
+    if (existingTabs.has(summaryTabName)) {
+      await callWithRetry(() =>
+        sheets.spreadsheets.values.batchClear({
+          spreadsheetId,
+          requestBody: { ranges: [summaryTabName] }
+        })
+      )
+    } else {
+      await callWithRetry(() =>
+        sheets.spreadsheets.batchUpdate({
+          spreadsheetId,
+          requestBody: { requests: [{ addSheet: { properties: { title: summaryTabName } } }] }
+        })
+      )
+    }
+
+    const p = opts.jobProgress
+    const summaryRows: unknown[][] = [
+      ['Job Name', p.job_name],
+      ['Status', p.status],
+      ['Total Connections', p.total_connections],
+      ['Completed', p.completed_connections],
+      ['Failed', p.failed_connections],
+      ['Total Rows', p.total_rows],
+      ['Started At', p.started_at],
+      ['Finished At', p.finished_at ?? ''],
+      ['Error', p.error ?? ''],
+      [],
+      ['Connection Name', 'Status', 'Rows', 'Started At', 'Finished At', 'Error']
+    ]
+    for (const c of p.connections) {
+      summaryRows.push([
+        c.connection_name,
+        c.status,
+        c.rows,
+        c.started_at ?? '',
+        c.finished_at ?? '',
+        c.error ?? ''
+      ])
+    }
+    await appendBatch(sheets, spreadsheetId, summaryTabName, summaryRows)
   }
 
   return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`
@@ -317,25 +482,31 @@ interface ServiceAccountCredentials {
 }
 
 function loadServiceAccountCredentials(config: GoogleSheetsConfig): ServiceAccountCredentials {
-  const raw = config.service_account_json ?? config.credentials_json
+  const raw = config.service_account_json ?? config.credentials_json ?? config.credentials
   if (!raw) {
     throw new Error('Google Sheets config is missing service_account_json credentials.')
   }
 
   let parsed: Record<string, unknown>
   if (typeof raw === 'string') {
+    // Normalise: the textarea sometimes wraps the JSON in {{ … }} (double
+    // curly braces). Strip them so we always get bare JSON.
+    const stripped = raw.trim().replace(/^\{\{/, '{').replace(/\}\}$/, '}').trim()
+
     // Allow a path to a JSON key file as well as the inline JSON blob.
-    if (raw.trim().startsWith('{')) {
+    if (stripped.startsWith('{')) {
       try {
-        parsed = JSON.parse(raw) as Record<string, unknown>
+        parsed = JSON.parse(stripped) as Record<string, unknown>
       } catch {
-        throw new Error('service_account_json is not valid JSON.')
+        throw new Error(
+          'service_account_json is not valid JSON. Paste the full service-account key file contents.'
+        )
       }
-    } else if (fs.existsSync(raw)) {
+    } else if (fs.existsSync(raw.trim())) {
       try {
-        parsed = JSON.parse(fs.readFileSync(raw, 'utf-8')) as Record<string, unknown>
+        parsed = JSON.parse(fs.readFileSync(raw.trim(), 'utf-8')) as Record<string, unknown>
       } catch {
-        throw new Error(`Could not read service account JSON from ${raw}`)
+        throw new Error(`Could not read service account JSON from ${raw.trim()}`)
       }
     } else {
       throw new Error('service_account_json must be a JSON blob or a path to an existing key file.')
@@ -346,6 +517,27 @@ function loadServiceAccountCredentials(config: GoogleSheetsConfig): ServiceAccou
 
   const email = parsed.client_email
   let key = parsed.private_key
+
+  // Detect common mistake: user pasted an OAuth2 web/installed client credentials
+  // file instead of a Service Account key file.
+  if (!email || !key) {
+    if (parsed.web || parsed.installed) {
+      throw new Error(
+        'Wrong credential type: you pasted an OAuth2 client credentials file. ' +
+          'Google Sheets requires a Service Account key file. ' +
+          'Go to Google Cloud Console → IAM & Admin → Service Accounts → ' +
+          'create/select a service account → Keys → Add Key → JSON. ' +
+          'Paste the downloaded JSON (it will contain "client_email" and "private_key").'
+      )
+    }
+    const missing: string[] = []
+    if (!email) missing.push('client_email')
+    if (!key) missing.push('private_key')
+    throw new Error(
+      `service_account_json is missing required fields: ${missing.join(', ')}. ` +
+        'Make sure you are pasting a Service Account key JSON file from Google Cloud Console.'
+    )
+  }
   if (typeof email !== 'string' || typeof key !== 'string') {
     throw new Error('service_account_json is missing required fields (client_email, private_key).')
   }

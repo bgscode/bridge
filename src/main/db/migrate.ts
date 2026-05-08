@@ -410,6 +410,17 @@ const migrations: Migration[] = [
         )
       }
     }
+  },
+  {
+    version: 24,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('last_connection_errors')) {
+        db.exec("ALTER TABLE jobs ADD COLUMN last_connection_errors TEXT NOT NULL DEFAULT '[]'")
+      }
+    }
   }
 ]
 

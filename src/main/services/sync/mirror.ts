@@ -109,14 +109,14 @@ export async function mirrorConnectionDelete(localId: number): Promise<void> {
 
 // ── Jobs ───────────────────────────────────────────────────────────────────
 
-function buildJobBody(row: JobRow): Record<string, unknown> {
+function buildJobBody(row: JobRow, mode: 'create' | 'update' = 'update'): Record<string, unknown> {
   const connRemoteIds = (row.connection_ids ?? [])
     .map((cid) => remoteIdOf('connections', cid))
     .filter((x): x is string => !!x)
-  return {
+  const jobGroupRemoteId = remoteIdOf('job_groups', row.job_group_id)
+  const body: Record<string, unknown> = {
     name: row.name,
     description: row.description ?? null,
-    job_group_id: remoteIdOf('job_groups', row.job_group_id),
     connection_ids: connRemoteIds,
     online_only: !!row.online_only,
     is_multi: !!row.is_multi,
@@ -135,10 +135,19 @@ function buildJobBody(row: JobRow): Record<string, unknown> {
     summary_extra_columns: row.summary_extra_columns ?? null,
     excel_combine_sheets: !!row.excel_combine_sheets
   }
+  // On create, omit job_group_id when null — sending null causes the server
+  // to emit `jobGroup: { disconnect: true }` which Prisma rejects on create.
+  // On update, always include it so the server can disconnect an existing group.
+  if (mode === 'create') {
+    if (jobGroupRemoteId) body.job_group_id = jobGroupRemoteId
+  } else {
+    body.job_group_id = jobGroupRemoteId
+  }
+  return body
 }
 
 export async function mirrorJobCreate(row: JobRow): Promise<void> {
-  const created = await call<{ id: string }>('POST', '/jobs', buildJobBody(row))
+  const created = await call<{ id: string }>('POST', '/jobs', buildJobBody(row, 'create'))
   if (created?.id) saveRemoteId('jobs', row.id, created.id)
 }
 

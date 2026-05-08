@@ -196,6 +196,8 @@ export interface JobRow {
    * affected subset without re-processing successful connections.
    */
   last_failed_connection_ids: number[]
+  /** Per-connection error details from last run. Stored as JSON: {id, name, error}[] */
+  last_connection_errors: { id: number; name: string; error: string }[]
   remote_id?: string | null
   created_at: string
   updated_at: string
@@ -208,6 +210,7 @@ export type CreateJobDto = Omit<
   | 'last_run_at'
   | 'last_error'
   | 'last_failed_connection_ids'
+  | 'last_connection_errors'
   | 'created_at'
   | 'updated_at'
 >

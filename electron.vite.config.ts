@@ -5,9 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, resolve('src'))
-  const apiUrl =
-    env.BRIDGE_API_URL ??
-    (mode === 'development' ? 'http://localhost:4000/api' : 'https://link.yonolight.com/api')
+  const apiUrl = env.BRIDGE_API_URL ?? 'https://link.yonolight.com/api'
 
   return {
     main: {
