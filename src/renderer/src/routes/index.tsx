@@ -28,6 +28,7 @@ const StoresPage = lazy(() => import('@/pages/stores'))
 const FiscalYearsPage = lazy(() => import('@/pages/fiscal-years'))
 const SettingsPage = lazy(() => import('@/pages/settings'))
 const JobsPage = lazy(() => import('@/pages/jobs'))
+const JobConnectionsPage = lazy(() => import('@/pages/job-connections'))
 const JobGroupPage = lazy(() => import('@/pages/job-group'))
 const SchedulePage = lazy(() => import('@/pages/schedule'))
 const JobErrorLogPage = lazy(() => import('@/pages/job-error-log'))
@@ -111,6 +112,14 @@ export const routes: RouteConfig[] = [
     element: <JobsPage />,
     showInSidebar: true,
     group: 'main',
+    roles: USER_VISIBLE
+  },
+  {
+    path: '/jobs/:jobId/connections',
+    label: 'Job Connections',
+    icon: <BriefcaseBusiness className="size-4" />,
+    element: <JobConnectionsPage />,
+    showInSidebar: false,
     roles: USER_VISIBLE
   },
   {

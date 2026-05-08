@@ -104,6 +104,46 @@ function localIdByRemoteId(table: string): Map<string, number> {
   return new Map(rows.map((r) => [r.remote_id, r.id]))
 }
 
+function normalizeUniqueNumberIds(values: unknown): number[] {
+  if (!Array.isArray(values)) return []
+
+  const seen = new Set<number>()
+  const normalized: number[] = []
+
+  for (const value of values) {
+    const parsed = typeof value === 'number' ? value : Number(value)
+
+    if (!Number.isInteger(parsed) || parsed <= 0 || seen.has(parsed)) {
+      continue
+    }
+
+    seen.add(parsed)
+    normalized.push(parsed)
+  }
+
+  return normalized
+}
+
+function normalizeUniqueStringIds(values: unknown): string[] {
+  if (!Array.isArray(values)) return []
+
+  const seen = new Set<string>()
+  const normalized: string[] = []
+
+  for (const value of values) {
+    const trimmed = typeof value === 'string' ? value.trim() : ''
+
+    if (!trimmed || seen.has(trimmed)) {
+      continue
+    }
+
+    seen.add(trimmed)
+    normalized.push(trimmed)
+  }
+
+  return normalized
+}
+
 // ── PUSH ────────────────────────────────────────────────────────────────────
 
 async function pushAll(token: string) {
@@ -190,7 +230,7 @@ async function pushAll(token: string) {
     jobs: local.jobs.map((r) => {
       const connIds: number[] = (() => {
         try {
-          return JSON.parse((r.connection_ids as string) ?? '[]') as number[]
+          return normalizeUniqueNumberIds(JSON.parse((r.connection_ids as string) ?? '[]'))
         } catch {
           return []
         }
@@ -211,7 +251,9 @@ async function pushAll(token: string) {
       })()
       const lastFailedConnectionIds: number[] = (() => {
         try {
-          return JSON.parse((r.last_failed_connection_ids as string) ?? '[]') as number[]
+          return normalizeUniqueNumberIds(
+            JSON.parse((r.last_failed_connection_ids as string) ?? '[]')
+          )
         } catch {
           return []
         }
@@ -236,7 +278,9 @@ async function pushAll(token: string) {
         jobGroupLocalId: (r.job_group_id as number | null) ?? null,
         jobGroupRemoteId: r.job_group_id ? jgRemote[r.job_group_id as number] : undefined,
         connectionLocalIds: connIds,
-        connectionRemoteIds: connIds.map((cid) => connRemote[cid]).filter((x): x is string => !!x),
+        connectionRemoteIds: normalizeUniqueStringIds(
+          connIds.map((cid) => connRemote[cid]).filter((x): x is string => !!x)
+        ),
         online_only: Boolean(r.online_only),
         is_multi: Boolean(r.is_multi),
         type: (r.type as 'query' | 'action') ?? 'query',
@@ -594,9 +638,11 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
   `)
   const txJ = db.transaction((rows: RemoteJob[]) => {
     for (const r of rows) {
-      const localConnIds = r.connectionIds
-        .map((rid) => connLocal.get(rid))
-        .filter((x): x is number => typeof x === 'number')
+      const localConnIds = normalizeUniqueNumberIds(
+        r.connectionIds
+          .map((rid) => connLocal.get(rid))
+          .filter((x): x is number => typeof x === 'number')
+      )
 
       // When the server returns null/empty for sql_query_names (e.g. because
       // the Postgres column migration hasn't run yet, or the mirror PATCH failed
@@ -629,7 +675,9 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
         status: r.status,
         last_run_at: r.lastRunAt,
         last_error: r.lastError,
-        last_failed_connection_ids: JSON.stringify(r.lastFailedConnectionIds ?? []),
+        last_failed_connection_ids: JSON.stringify(
+          normalizeUniqueNumberIds(r.lastFailedConnectionIds ?? [])
+        ),
         last_connection_errors: JSON.stringify(r.lastConnectionErrors ?? []),
         modify_dates: r.modifyDates != null ? (r.modifyDates ? 1 : 0) : 1,
         summary_extra_columns: r.summaryExtraColumns ? JSON.stringify(r.summaryExtraColumns) : null,

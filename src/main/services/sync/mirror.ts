@@ -11,6 +11,7 @@ import db from '../../db/index'
 import type { ConnectionRow, JobRow, JobVariable } from '@shared/index'
 
 const API_BASE = process.env.BRIDGE_API_URL
+let hasWarnedMissingJobConnectionsRoute = false
 
 /**
  * Calls the server. Returns `null` only when the user is not an admin (or not
@@ -22,7 +23,7 @@ async function call<T>(
   method: string,
   path: string,
   body?: unknown,
-  options: { adminOnly?: boolean } = { adminOnly: true }
+  options: { adminOnly?: boolean; suppressErrorLog?: boolean } = { adminOnly: true }
 ): Promise<T | null> {
   if (!API_BASE) return null
   const token = getAuthToken()
@@ -51,10 +52,20 @@ async function call<T>(
   }
   if (!res.ok || !data.success) {
     const err = data.error || data.message || `HTTP ${res.status}`
-    console.error(`[mirror] ${method} ${path} failed:`, err)
+    if (!options.suppressErrorLog) {
+      console.error(`[mirror] ${method} ${path} failed:`, err)
+    }
     throw new Error(`Server rejected ${method} ${path}: ${err}`)
   }
   return data.data ?? null
+}
+
+function assertRemoteWriteAvailable<T>(result: T | null, action: string): T {
+  if (result !== null) {
+    return result
+  }
+
+  throw new Error(`${action} requires a configured backend URL and an authenticated session.`)
 }
 
 function remoteIdOf(table: string, localId: number | null | undefined): string | null {
@@ -110,9 +121,13 @@ export async function mirrorConnectionDelete(localId: number): Promise<void> {
 // ── Jobs ───────────────────────────────────────────────────────────────────
 
 function buildJobBody(row: JobRow, mode: 'create' | 'update' = 'update'): Record<string, unknown> {
-  const connRemoteIds = (row.connection_ids ?? [])
-    .map((cid) => remoteIdOf('connections', cid))
-    .filter((x): x is string => !!x)
+  const connRemoteIds = Array.from(
+    new Set(
+      (row.connection_ids ?? [])
+        .map((cid) => remoteIdOf('connections', cid))
+        .filter((x): x is string => !!x)
+    )
+  )
   const jobGroupRemoteId = remoteIdOf('job_groups', row.job_group_id)
   const body: Record<string, unknown> = {
     name: row.name,
@@ -147,8 +162,42 @@ function buildJobBody(row: JobRow, mode: 'create' | 'update' = 'update'): Record
   return body
 }
 
+function buildLegacyJobBody(
+  row: JobRow,
+  mode: 'create' | 'update' = 'update'
+): Record<string, unknown> {
+  const body = buildJobBody(row, mode)
+
+  delete body.job_color
+  delete body.summary_extra_columns
+  delete body.excel_combine_sheets
+
+  return body
+}
+
+function isLegacyJobFieldError(message: string): boolean {
+  return /Unknown argument `(jobColor|summaryExtraColumns|excelCombineSheets)`/i.test(message)
+}
+
 export async function mirrorJobCreate(row: JobRow): Promise<void> {
-  const created = await call<{ id: string }>('POST', '/jobs', buildJobBody(row, 'create'))
+  let created: { id: string } | null
+
+  try {
+    created = await call<{ id: string }>('POST', '/jobs', buildJobBody(row, 'create'))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    if (!isLegacyJobFieldError(message)) {
+      throw error
+    }
+
+    console.warn(
+      '[mirror] job create rejected newer fields on server; retrying with legacy-compatible payload'
+    )
+
+    created = await call<{ id: string }>('POST', '/jobs', buildLegacyJobBody(row, 'create'))
+  }
+
   if (created?.id) saveRemoteId('jobs', row.id, created.id)
 }
 
@@ -158,7 +207,72 @@ export async function mirrorJobUpdate(row: JobRow): Promise<void> {
     await mirrorJobCreate(row)
     return
   }
-  await call('PATCH', `/jobs/${rid}`, buildJobBody(row))
+
+  try {
+    assertRemoteWriteAvailable(await call('PATCH', `/jobs/${rid}`, buildJobBody(row)), 'Job update')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    if (!isLegacyJobFieldError(message)) {
+      throw error
+    }
+
+    console.warn(
+      '[mirror] job update rejected newer fields on server; retrying with legacy-compatible payload'
+    )
+
+    assertRemoteWriteAvailable(
+      await call('PATCH', `/jobs/${rid}`, buildLegacyJobBody(row)),
+      'Job update compatibility fallback'
+    )
+  }
+}
+
+export async function mirrorJobConnectionsUpdate(row: JobRow): Promise<void> {
+  const rid = row.remote_id ?? remoteIdOf('jobs', row.id)
+
+  if (!rid) {
+    await mirrorJobCreate(row)
+    return
+  }
+
+  const connectionIds = Array.from(
+    new Set(
+      (row.connection_ids ?? [])
+        .map((cid) => remoteIdOf('connections', cid))
+        .filter((value): value is string => !!value)
+    )
+  )
+
+  try {
+    assertRemoteWriteAvailable(
+      await call(
+        'PATCH',
+        `/jobs/${rid}/connections`,
+        { connection_ids: connectionIds },
+        { adminOnly: false, suppressErrorLog: true }
+      ),
+      'Job connection update'
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    if (!/Route not found .*\/api\/jobs\/[^/]+\/connections/i.test(message)) {
+      throw error
+    }
+
+    if (!hasWarnedMissingJobConnectionsRoute) {
+      hasWarnedMissingJobConnectionsRoute = true
+      console.warn(
+        '[mirror] job connections route missing on server; falling back to PATCH /jobs/:id compatibility path'
+      )
+    }
+
+    assertRemoteWriteAvailable(
+      await call('PATCH', `/jobs/${rid}`, { connection_ids: connectionIds }, { adminOnly: false }),
+      'Job connection update fallback'
+    )
+  }
 }
 
 export async function mirrorJobDelete(localId: number): Promise<void> {

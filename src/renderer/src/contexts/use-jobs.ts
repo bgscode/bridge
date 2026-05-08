@@ -6,6 +6,7 @@ export interface JobsContextValue {
   runningJobs: JobProgress[]
   create: (data: CreateJobDto) => Promise<JobRow>
   update: (id: number, data: UpdateJobDto) => Promise<void>
+  updateConnections: (id: number, connectionIds: number[]) => Promise<void>
   remove: (id: number) => Promise<void>
   removeMany: (ids: number[]) => Promise<void>
   bulkCreate: (items: CreateJobDto[]) => Promise<JobRow[]>

@@ -169,9 +169,11 @@ function normalizeNumber(value: unknown): number | null {
 
 function normalizeNumberArray(values: unknown): number[] {
   if (!Array.isArray(values)) return []
-  return values
+  const normalized = values
     .map((value) => normalizeNumber(value))
     .filter((value): value is number => value !== null)
+
+  return Array.from(new Set(normalized))
 }
 
 function normalizeJobColor(value: string | null | undefined): string | null {
@@ -246,7 +248,7 @@ interface JobFormProps {
   onOpenChange: (open: boolean) => void
   mode: 'create' | 'edit'
   data?: Partial<JobFormValues> & { id?: number; schedule_raw?: string | null }
-  onSubmit: (values: JobFormValues) => void
+  onSubmit: (values: JobFormValues) => Promise<void>
 }
 
 type ActionStagedUpload = {
@@ -709,7 +711,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         online_only: data?.online_only ?? false,
         is_multi: data?.is_multi ?? false,
         modify_dates: data?.modify_dates ?? true,
-        connection_ids: data?.connection_ids ?? [],
+        connection_ids: normalizeNumberArray(data?.connection_ids ?? []),
         sql_query: data?.sql_query?.length ? data.sql_query : [''],
         sql_query_names: data?.sql_query?.length
           ? (data.sql_query_names?.slice(0, data.sql_query.length) ?? []).concat(
@@ -746,6 +748,14 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
       })
     }
   }, [isOpen, mode, data, reset, createDraft])
+
+  useEffect(() => {
+    if (!isOpen) return
+
+    setFilterGroup(null)
+    setFilterStore(null)
+    setFilterFiscalYear(null)
+  }, [isOpen, mode, data?.id])
 
   const selectedConnections = connections.filter((c) => selectedConnectionIds.includes(c.id))
   const defaultSingleSheetName =
@@ -874,7 +884,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
     }
   }
 
-  function onValid(values: JobFormValues): void {
+  async function onValid(values: JobFormValues): Promise<void> {
+    const connectionIds = normalizeNumberArray(values.connection_ids)
+
     // Serialize destination sub-fields into destination_config as JSON
     let destination_config: string | null | undefined = values.destination_config
     if (values.destination_type === 'api') {
@@ -968,8 +980,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         repeatCount: values.schedule_repeat_count
       })
     }
-    onSubmit({
+    await onSubmit({
       ...values,
+      connection_ids: connectionIds,
       operation: values.destination_type === 'excel' ? 'replace' : values.operation,
       destination_config,
       schedule,
@@ -1014,7 +1027,12 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
     return true
   })
 
-  const connectionOptions = filteredConnections.map((c) => ({
+  const filteredConnectionIds = new Set(filteredConnections.map((connection) => connection.id))
+  const selectableConnections = filteredConnections.concat(
+    selectedConnections.filter((connection) => !filteredConnectionIds.has(connection.id))
+  )
+
+  const connectionOptions = selectableConnections.map((c) => ({
     value: c.id,
     label: c.name,
     data: c

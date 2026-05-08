@@ -63,6 +63,7 @@ declare global {
         create: (data: CreateJobDto) => Promise<JobRow>
         bulkCreate: (items: CreateJobDto[]) => Promise<JobRow[]>
         update: (id: number, data: unknown) => Promise<JobRow | undefined>
+        updateConnections: (id: number, connectionIds: number[]) => Promise<JobRow | undefined>
         delete: (id: number) => Promise<boolean>
         deleteAll: (ids: number[]) => Promise<void>
         run: (id: number, options?: JobRunOptions) => Promise<JobProgress>

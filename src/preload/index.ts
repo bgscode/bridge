@@ -43,6 +43,8 @@ const api = {
     create: (data: unknown) => ipcRenderer.invoke('jobs:create', data),
     bulkCreate: (items: unknown[]) => ipcRenderer.invoke('jobs:bulkCreate', items),
     update: (id: number, data: unknown) => ipcRenderer.invoke('jobs:update', id, data),
+    updateConnections: (id: number, connectionIds: number[]) =>
+      ipcRenderer.invoke('jobs:updateConnections', id, connectionIds),
     delete: (id: number) => ipcRenderer.invoke('jobs:delete', id),
     deleteAll: (ids: number[]) => ipcRenderer.invoke('jobs:deleteAll', ids),
     run: (id: number, options?: unknown) => ipcRenderer.invoke('jobs:run', id, options),

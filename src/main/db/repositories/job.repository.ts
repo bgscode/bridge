@@ -31,16 +31,38 @@ interface RawJobRow extends Omit<
   excel_combine_sheets: number
 }
 
+function normalizeUniqueIntegerIds(values: unknown): number[] {
+  if (!Array.isArray(values)) return []
+
+  const seen = new Set<number>()
+  const normalized: number[] = []
+
+  for (const value of values) {
+    const parsed = typeof value === 'number' ? value : Number(value)
+
+    if (!Number.isInteger(parsed) || parsed <= 0 || seen.has(parsed)) {
+      continue
+    }
+
+    seen.add(parsed)
+    normalized.push(parsed)
+  }
+
+  return normalized
+}
+
 function parseRow(raw: RawJobRow): JobRow {
   return {
     ...raw,
-    connection_ids: JSON.parse(raw.connection_ids || '[]'),
+    connection_ids: normalizeUniqueIntegerIds(JSON.parse(raw.connection_ids || '[]')),
     sql_query: JSON.parse(raw.sql_query || '[]'),
     sql_query_names: JSON.parse(raw.sql_query_names || '[]'),
     is_multi: Boolean(raw.is_multi),
     online_only: Boolean(raw.online_only),
     modify_dates: raw.modify_dates === undefined ? true : Boolean(raw.modify_dates),
-    last_failed_connection_ids: JSON.parse(raw.last_failed_connection_ids || '[]'),
+    last_failed_connection_ids: normalizeUniqueIntegerIds(
+      JSON.parse(raw.last_failed_connection_ids || '[]')
+    ),
     last_connection_errors: JSON.parse(raw.last_connection_errors || '[]'),
     summary_extra_columns: raw.summary_extra_columns ? JSON.parse(raw.summary_extra_columns) : null,
     excel_combine_sheets: Boolean(raw.excel_combine_sheets)
@@ -53,7 +75,7 @@ function serializeForInsert(data: CreateJobDto): Record<string, unknown> {
     description: data.description ?? null,
     job_color: data.job_color ?? null,
     job_group_id: data.job_group_id ?? null,
-    connection_ids: JSON.stringify(data.connection_ids ?? []),
+    connection_ids: JSON.stringify(normalizeUniqueIntegerIds(data.connection_ids ?? [])),
     online_only: data.online_only ? 1 : 0,
     is_multi: data.is_multi ? 1 : 0,
     modify_dates: data.modify_dates === false ? 0 : 1,
@@ -110,7 +132,7 @@ function serializeForUpdate(data: Record<string, unknown>): Record<string, unkno
     if (value === undefined) continue
     if (!KNOWN_COLUMNS.has(key)) continue
     if (key === 'connection_ids' || key === 'last_failed_connection_ids') {
-      out[key] = JSON.stringify(value ?? [])
+      out[key] = JSON.stringify(normalizeUniqueIntegerIds(value ?? []))
     } else if (key === 'last_connection_errors') {
       out[key] = JSON.stringify(value ?? [])
     } else if (key === 'sql_query' || key === 'sql_query_names') {

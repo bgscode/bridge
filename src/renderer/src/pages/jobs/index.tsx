@@ -7,8 +7,9 @@ import {
   useRef,
   useState
 } from 'react'
+import { useNavigate } from 'react-router-dom'
 import type { RowSelectionState } from '@tanstack/react-table'
-import { BriefcaseBusiness, Play, Plus, RotateCcw, Trash2, Variable } from 'lucide-react'
+import { BriefcaseBusiness, Link2, Play, Plus, RotateCcw, Trash2, Variable } from 'lucide-react'
 
 import { DataGrid, type DataGridColumnDef } from '@/components/data-grid'
 import { Badge } from '@/components/ui/badge'
@@ -139,6 +140,7 @@ export default function JobsPage(): JSX.Element {
   const { jobGroups } = useJobGroups()
   const { connections } = useConnections()
   const { user: me } = useAuth()
+  const navigate = useNavigate()
   const isAdmin = me?.role === 'admin'
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
   const isMountedRef = useRef(false)
@@ -176,7 +178,9 @@ export default function JobsPage(): JSX.Element {
     setFormOpen(true)
   }
 
-  function handleFormSubmit(values: JobFormValues & { schedule?: string | null }): void {
+  async function handleFormSubmit(
+    values: JobFormValues & { schedule?: string | null }
+  ): Promise<void> {
     const isAction = values.type === 'action'
     const dto: CreateJobDto = {
       name: values.name,
@@ -210,9 +214,9 @@ export default function JobsPage(): JSX.Element {
           : false
     }
     if (formMode === 'create') {
-      create(dto)
+      await create(dto)
     } else if (selected) {
-      update(selected.id, dto as UpdateJobDto)
+      await update(selected.id, dto as UpdateJobDto)
     }
   }
 
@@ -243,6 +247,10 @@ export default function JobsPage(): JSX.Element {
 
   function handleRunJob(job: JobRow): void {
     setRunTarget(job)
+  }
+
+  function handleEditConnections(job: JobRow): void {
+    navigate(`/jobs/${job.id}/connections`)
   }
 
   function handleRunConfirm(options: JobRunOptions): void {
@@ -393,6 +401,15 @@ export default function JobsPage(): JSX.Element {
                 <DropdownMenuItem
                   onClick={(e) => {
                     e.stopPropagation()
+                    handleEditConnections(row.original)
+                  }}
+                >
+                  <Link2 className="size-4" />
+                  Edit Connections
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
                     handleRunJob(row.original)
                   }}
                 >
@@ -440,6 +457,7 @@ export default function JobsPage(): JSX.Element {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const selectedCount = Object.keys(rowSelection).length
+  const selectedJob = selected ? (jobs.find((job) => job.id === selected.id) ?? selected) : null
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -507,7 +525,7 @@ export default function JobsPage(): JSX.Element {
         isOpen={formOpen}
         onOpenChange={setFormOpen}
         mode={formMode}
-        data={selected ? { ...selected, schedule_raw: selected.schedule } : undefined}
+        data={selectedJob ? { ...selectedJob, schedule_raw: selectedJob.schedule } : undefined}
         onSubmit={handleFormSubmit}
       />
 

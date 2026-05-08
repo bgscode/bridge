@@ -58,7 +58,7 @@ function getApiBaseUrl(): string {
   return (
     env.BRIDGE_API_URL ??
     env.VITE_BRIDGE_API_URL ??
-    (import.meta.env.DEV ? 'http://localhost:4000/api' : 'https://link.yonolight.com/api')
+    'https://link.yonolight.com/api'
   ).replace(/\/$/, '')
 }
 

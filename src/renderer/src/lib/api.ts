@@ -1,8 +1,7 @@
 const API_BASE_URL = (
   ((import.meta.env as ImportMetaEnv & Record<string, string | undefined>).BRIDGE_API_URL as
     | string
-    | undefined) ??
-  (import.meta.env.DEV ? 'http://localhost:4000/api' : 'https://link.yonolight.com/api')
+    | undefined) ?? 'https://link.yonolight.com/api'
 ).replace(/\/$/, '')
 const TOKEN_KEY = 'bridge_auth_token'
 

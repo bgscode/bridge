@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron'
 import { jobRepository } from '../db/repositories/job.repository'
 import { connection as connectionRepo } from '../db/repositories/connection.repository'
-import { CreateJobDto, UpdateJobDto, JobRunOptions } from '@shared/index'
+import { CreateJobDto, UpdateJobDto, JobRunOptions, JobRow } from '@shared/index'
 import { runJob, cancelJob, getRunningJobs, isJobRunning } from '../services/job/job-executor'
 import { getSchedulerStatus, rescheduleJob } from '../services/job/job-scheduler'
 import { connectUsingBestIp } from '../services/connection/sql-connector'
@@ -12,7 +12,27 @@ import {
   isStagedUploadPath
 } from '../services/job/upload-storage'
 import { previewActionFile } from '../services/job/action-file-preview'
-import { mirrorJobCreate, mirrorJobUpdate, mirrorJobDelete } from '../services/sync/mirror'
+import {
+  mirrorJobConnectionsUpdate,
+  mirrorJobCreate,
+  mirrorJobUpdate,
+  mirrorJobDelete
+} from '../services/sync/mirror'
+
+function mergeDefinedJobPatch(base: JobRow, patch: UpdateJobDto): JobRow {
+  const next: JobRow = { ...base }
+
+  for (const [key, value] of Object.entries(patch) as [
+    keyof UpdateJobDto,
+    UpdateJobDto[keyof UpdateJobDto]
+  ][]) {
+    if (value !== undefined) {
+      ;(next as unknown as Record<string, unknown>)[key] = value as unknown
+    }
+  }
+
+  return next
+}
 
 function handleError(err: unknown): never {
   const e = err as { code?: string; message?: string }
@@ -81,9 +101,52 @@ export function registerJobIpc(): void {
 
   ipcMain.handle('jobs:update', async (_, id: number, data: UpdateJobDto) => {
     try {
+      const existing = jobRepository.findById(id)
+      if (!existing) return undefined
+
+      const nextRow = mergeDefinedJobPatch(existing, data)
+      await mirrorJobUpdate(nextRow)
+
       const row = jobRepository.update(id, data)
-      if (row) await mirrorJobUpdate(row)
       return row
+    } catch (error) {
+      handleError(error)
+    }
+  })
+
+  ipcMain.handle('jobs:updateConnections', async (_, id: number, connectionIds: number[]) => {
+    try {
+      const existing = jobRepository.findById(id)
+      if (!existing) return undefined
+
+      const uniqueConnectionIds = Array.from(
+        new Set(
+          (Array.isArray(connectionIds) ? connectionIds : []).filter(
+            (value): value is number => Number.isInteger(value) && value > 0
+          )
+        )
+      )
+
+      for (const connectionId of uniqueConnectionIds) {
+        if (!connectionRepo.findById(connectionId)) {
+          throw new Error(`Connection not found: ${connectionId}`)
+        }
+      }
+
+      const nextRow = {
+        ...existing,
+        connection_ids: uniqueConnectionIds
+      }
+
+      await mirrorJobConnectionsUpdate(nextRow)
+
+      const row = jobRepository.update(id, { connection_ids: uniqueConnectionIds })
+
+      if (!row) {
+        return undefined
+      }
+
+      return jobRepository.findById(id) ?? row
     } catch (error) {
       handleError(error)
     }

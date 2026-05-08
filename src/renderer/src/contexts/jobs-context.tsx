@@ -71,6 +71,20 @@ export function JobsProvider({ children }: { children: ReactNode }): ReactNode {
     if (updated) setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)))
   }, [])
 
+  const updateConnections = useCallback(
+    async (id: number, connectionIds: number[]): Promise<void> => {
+      const promise = window.api.jobs.updateConnections(id, connectionIds)
+      toast.promise(promise, {
+        loading: 'Saving job connections…',
+        success: 'Job connections updated.',
+        error: (err) => (err as Error).message
+      })
+      const updated = await promise
+      if (updated) setJobs((prev) => prev.map((job) => (job.id === id ? updated : job)))
+    },
+    []
+  )
+
   const remove = useCallback(async (id: number): Promise<void> => {
     const promise = window.api.jobs.delete(id)
     toast.promise(promise, {
@@ -132,6 +146,7 @@ export function JobsProvider({ children }: { children: ReactNode }): ReactNode {
         runningJobs,
         create,
         update,
+        updateConnections,
         remove,
         removeMany,
         bulkCreate,
