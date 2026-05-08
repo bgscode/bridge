@@ -13,11 +13,19 @@ interface DataGridBodyProps<TData> {
   estimatedRowHeight?: number
   selectionMode?: 'single' | 'multiple' | 'none'
   onRowClick?: (row: Row<TData>) => void
+  getRowStyle?: (row: Row<TData>) => React.CSSProperties | undefined
   loading?: boolean
   emptyMessage?: string
   renderEmptyState?: () => React.ReactNode
   height?: number | string
   scrollContainerRef?: RefObject<HTMLDivElement | null>
+}
+
+type DataGridRowStyle = React.CSSProperties & {
+  '--data-grid-row-bg'?: string
+  '--data-grid-row-hover-bg'?: string
+  '--data-grid-row-pinned-bg'?: string
+  '--data-grid-row-pinned-hover-bg'?: string
 }
 
 const DENSITY_ROW_CLASS: Record<DataGridDensity, string> = {
@@ -45,11 +53,12 @@ export function DataGridBody<TData>({
   estimatedRowHeight,
   selectionMode,
   onRowClick,
+  getRowStyle,
   loading,
   emptyMessage = 'No results found.',
   renderEmptyState,
   scrollContainerRef
-}: DataGridBodyProps<TData>) {
+}: DataGridBodyProps<TData>): React.ReactElement {
   // When virtualization is enabled, use all rows (pre-pagination) so the virtualizer
   // handles the "windowing" instead of pagination. Otherwise use paginated rows.
   const rows = enableVirtualization
@@ -133,6 +142,7 @@ export function DataGridBody<TData>({
               density={density}
               selectionMode={selectionMode}
               onRowClick={onRowClick}
+              getRowStyle={getRowStyle}
               virtualStyle={{
                 display: 'flex',
                 position: 'absolute',
@@ -162,6 +172,7 @@ export function DataGridBody<TData>({
           density={density}
           selectionMode={selectionMode}
           onRowClick={onRowClick}
+          getRowStyle={getRowStyle}
         />
       ))}
     </tbody>
@@ -177,6 +188,7 @@ const BodyRow = memo(function BodyRow<TData>({
   density,
   selectionMode,
   onRowClick,
+  getRowStyle,
   virtualStyle
 }: {
   row: Row<TData>
@@ -187,25 +199,48 @@ const BodyRow = memo(function BodyRow<TData>({
   density: DataGridDensity
   selectionMode?: 'single' | 'multiple' | 'none'
   onRowClick?: (row: Row<TData>) => void
+  getRowStyle?: (row: Row<TData>) => React.CSSProperties | undefined
   virtualStyle?: React.CSSProperties
 }) {
+  void _columnOrderKey
+  void _columnPinningKey
+  void _columnSizingKey
+
   const isVirtualized = !!virtualStyle
+  const customRowStyle = (getRowStyle?.(row) ?? {}) as DataGridRowStyle
+  const hasCustomTint =
+    typeof customRowStyle['--data-grid-row-bg'] === 'string' &&
+    customRowStyle['--data-grid-row-bg'] !== 'transparent'
+  const rowStyle: DataGridRowStyle = {
+    '--data-grid-row-bg': 'transparent',
+    '--data-grid-row-hover-bg':
+      'color-mix(in srgb, var(--color-muted-foreground) 6%, var(--color-background))',
+    '--data-grid-row-pinned-bg': 'var(--color-background)',
+    '--data-grid-row-pinned-hover-bg':
+      'color-mix(in srgb, var(--color-muted-foreground) 6%, var(--color-background))',
+    ...customRowStyle,
+    ...virtualStyle
+  }
+  const basePinnedBackground = rowStyle['--data-grid-row-pinned-bg'] ?? 'var(--color-background)'
+  const hoverPinnedBackground =
+    rowStyle['--data-grid-row-pinned-hover-bg'] ??
+    'color-mix(in srgb, var(--color-muted-foreground) 6%, var(--color-background))'
 
   return (
     <tr
-      style={virtualStyle}
+      style={rowStyle}
       onMouseEnter={(e) => {
         e.currentTarget.querySelectorAll<HTMLTableCellElement>('td[data-pinned]').forEach((td) => {
           td.style.backgroundColor = isSelected
             ? 'color-mix(in srgb, var(--color-primary) 10%, var(--color-background))'
-            : 'color-mix(in srgb, var(--color-muted-foreground) 6%, var(--color-background))'
+            : hoverPinnedBackground
         })
       }}
       onMouseLeave={(e) => {
         e.currentTarget.querySelectorAll<HTMLTableCellElement>('td[data-pinned]').forEach((td) => {
           td.style.backgroundColor = isSelected
             ? 'color-mix(in srgb, var(--color-primary) 8%, var(--color-background))'
-            : 'var(--color-background)'
+            : basePinnedBackground
         })
       }}
       onClick={() => {
@@ -216,7 +251,9 @@ const BodyRow = memo(function BodyRow<TData>({
       className={cn(
         'group border-b transition-colors',
         isVirtualized ? DENSITY_TEXT_CLASS[density] : DENSITY_ROW_CLASS[density],
-        isSelected ? 'bg-primary/8 hover:bg-primary/10' : 'hover:bg-muted/50',
+        isSelected
+          ? 'bg-primary/8 hover:bg-primary/10'
+          : 'bg-[var(--data-grid-row-bg)] hover:bg-[var(--data-grid-row-hover-bg)]',
         (selectionMode === 'single' || onRowClick) && 'cursor-pointer'
       )}
     >
@@ -233,10 +270,11 @@ const BodyRow = memo(function BodyRow<TData>({
               minWidth: column.getSize(),
               maxWidth: column.getSize(),
               ...getPinStyles(column),
-              ...(column.getIsPinned() && isSelected
+              ...(column.getIsPinned()
                 ? {
-                    backgroundColor:
-                      'color-mix(in srgb, var(--color-primary) 8%, var(--color-background))'
+                    backgroundColor: isSelected
+                      ? 'color-mix(in srgb, var(--color-primary) 8%, var(--color-background))'
+                      : basePinnedBackground
                   }
                 : {}),
               // When virtualized, td must flex to fill the row height
@@ -259,7 +297,12 @@ const BodyRow = memo(function BodyRow<TData>({
                 onCheckedChange={(checked) => row.toggleSelected(!!checked)}
                 onClick={(e) => e.stopPropagation()}
                 aria-label="Select row"
-                className="translate-y-px"
+                className={cn(
+                  'translate-y-px',
+                  hasCustomTint &&
+                    !isSelected &&
+                    'border-slate-500/85 bg-white/92 text-slate-900 shadow-[0_1px_2px_rgba(15,23,42,0.12)] hover:border-slate-700'
+                )}
               />
             ) : (
               <span className="truncate block">
@@ -280,5 +323,6 @@ const BodyRow = memo(function BodyRow<TData>({
   density: DataGridDensity
   selectionMode?: 'single' | 'multiple' | 'none'
   onRowClick?: (row: Row<TData>) => void
+  getRowStyle?: (row: Row<TData>) => React.CSSProperties | undefined
   virtualStyle?: React.CSSProperties
 }) => React.ReactElement

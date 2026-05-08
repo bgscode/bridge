@@ -107,7 +107,7 @@ async function main() {
     const resvg = new Resvg(Buffer.from(wrapper))
     const png = resvg.render().asPng()
     fs.writeFileSync(outFile, png)
-    console.log('  wrote', outFile)
+    // console.log('  wrote', outFile)
   }
 
   // Also create a 512 PNG for linux packaging (dock-styled)
@@ -146,7 +146,7 @@ async function main() {
     const icoBuf = buildIcoFromPngs(pngBuffers, icoSizes)
     const icoOut = path.join(root, 'build', 'icon.ico')
     fs.writeFileSync(icoOut, icoBuf)
-    console.log('  wrote', icoOut)
+    // console.log('  wrote', icoOut)
   } catch (err) {
     console.warn('ICO generation failed:', err && err.message ? err.message : err)
   }
@@ -154,9 +154,9 @@ async function main() {
   // mac .icns
   const icnsOut = path.join(root, 'build', 'icon.icns')
   try {
-    console.log('Creating .icns with iconutil...')
+    // console.log('Creating .icns with iconutil...')
     execSync(`iconutil -c icns "${iconsetDir}" -o "${icnsOut}"`, { stdio: 'inherit' })
-    console.log('  wrote', icnsOut)
+    // console.log('  wrote', icnsOut)
   } catch (err) {
     console.warn(
       'iconutil failed — skipping .icns creation (is this macOS or is iconutil available?)'

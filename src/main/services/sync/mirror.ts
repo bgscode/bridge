@@ -117,6 +117,7 @@ function buildJobBody(row: JobRow, mode: 'create' | 'update' = 'update'): Record
   const body: Record<string, unknown> = {
     name: row.name,
     description: row.description ?? null,
+    job_color: row.job_color ?? null,
     connection_ids: connRemoteIds,
     online_only: !!row.online_only,
     is_multi: !!row.is_multi,

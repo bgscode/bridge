@@ -28,10 +28,13 @@ import { usePersistentDraft } from '@/hooks/use-persistent-draft'
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
+const DEFAULT_JOB_ROW_COLOR = '#2563eb'
+
 const schema = z
   .object({
     name: z.string().min(1, 'Name is required'),
     description: z.string().optional().nullable(),
+    job_color: z.string().optional().nullable(),
     job_group_id: z.number().optional().nullable(),
     type: z.enum(['query', 'action']),
     online_only: z.boolean(),
@@ -91,6 +94,7 @@ export type JobFormValues = z.infer<typeof schema>
 const DEFAULT_FORM_VALUES: JobFormValues = {
   name: '',
   description: '',
+  job_color: null,
   job_group_id: null,
   type: 'query',
   online_only: false,
@@ -170,9 +174,30 @@ function normalizeNumberArray(values: unknown): number[] {
     .filter((value): value is number => value !== null)
 }
 
+function normalizeJobColor(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null
+
+  const trimmed = value.trim()
+
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return trimmed.toLowerCase()
+  }
+
+  const shortHex = trimmed.match(/^#([0-9a-fA-F]{3})$/)
+
+  if (!shortHex) {
+    return null
+  }
+
+  const [red, green, blue] = shortHex[1].split('')
+
+  return `#${red}${red}${green}${green}${blue}${blue}`.toLowerCase()
+}
+
 function normalizeJobDraft(draft: JobFormValues): JobFormValues {
   return {
     ...draft,
+    job_color: normalizeJobColor(draft.job_color),
     job_group_id: normalizeNumber(draft.job_group_id),
     connection_ids: normalizeNumberArray(draft.connection_ids),
     schedule_days: normalizeNumberArray(draft.schedule_days ?? []),
@@ -480,6 +505,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const selectedConnectionIds = useWatch({ control, name: 'connection_ids' }) ?? []
   const sheetIdInput = useWatch({ control, name: 'sheet_id' })
   const jobNameInput = useWatch({ control, name: 'name' })
+  const jobColor = useWatch({ control, name: 'job_color' })
   const currentSheetName = useWatch({ control, name: 'sheet_name' })
   const apiMethod = useWatch({ control, name: 'api_method' })
   const templatePath = useWatch({ control, name: 'template_path' })
@@ -677,6 +703,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
       reset({
         name: data?.name ?? '',
         description: data?.description ?? '',
+        job_color: normalizeJobColor(data?.job_color ?? null),
         job_group_id: data?.job_group_id ?? null,
         type: data?.type ?? 'query',
         online_only: data?.online_only ?? false,
@@ -723,6 +750,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const selectedConnections = connections.filter((c) => selectedConnectionIds.includes(c.id))
   const defaultSingleSheetName =
     toGoogleSheetTabName(selectedConnections[0]?.name ?? '') || 'Sheet1'
+  const displayedJobColor = normalizeJobColor(jobColor) ?? DEFAULT_JOB_ROW_COLOR
 
   useEffect(() => {
     if (destType !== 'google_sheets') return
@@ -948,11 +976,13 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
       template_path: derivedTemplatePath,
       template_mode: derivedTemplateMode,
       summary_extra_columns:
-        values.destination_type === 'excel' && Array.isArray(values.summary_extra_columns)
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
+        Array.isArray(values.summary_extra_columns)
           ? values.summary_extra_columns
           : null,
       excel_combine_sheets:
-        values.destination_type === 'excel' && !values.is_multi
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
+        !values.is_multi
           ? (values.excel_combine_sheets ?? false)
           : false
     } as JobFormValues)
@@ -1030,6 +1060,43 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                       placeholder="What does this job do?"
                       {...register('description')}
                     />
+                  </Field>
+                  <Field>
+                    <FieldLabel>Job Row Color</FieldLabel>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="color"
+                        value={displayedJobColor}
+                        onChange={(event) =>
+                          setValue('job_color', normalizeJobColor(event.target.value), {
+                            shouldDirty: true,
+                            shouldTouch: true,
+                            shouldValidate: true
+                          })
+                        }
+                        className="h-10 w-12 cursor-pointer rounded border border-input bg-background p-1"
+                        aria-label="Pick a job row color"
+                      />
+                      <Input value={jobColor ?? ''} readOnly placeholder="Optional row tint" />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          setValue('job_color', null, {
+                            shouldDirty: true,
+                            shouldTouch: true,
+                            shouldValidate: true
+                          })
+                        }
+                        disabled={!jobColor}
+                      >
+                        Clear
+                      </Button>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Optional. Jobs list rows use this color at 30% opacity.
+                    </p>
                   </Field>
                   <Field>
                     <FieldLabel>Job Group</FieldLabel>
@@ -1997,6 +2064,50 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                             </button>
                           </div>
                         )}
+
+                        <Field>
+                          <FieldLabel>Summary Sheet Extra Columns</FieldLabel>
+                          <p className="text-xs text-muted-foreground mb-2">
+                            Select which connection metadata to add after the &quot;Sheet Name&quot;
+                            column in the Google Sheets Summary tab.
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {(
+                              [
+                                { key: 'group_name', label: 'Group Name' },
+                                { key: 'store_name', label: 'Store Name' },
+                                { key: 'fiscal_year_name', label: 'Fiscal Year' },
+                                { key: 'static_ip', label: 'Static IP' },
+                                { key: 'vpn_ip', label: 'VPN IP' },
+                                { key: 'db_name', label: 'Database Name' }
+                              ] as const
+                            ).map(({ key, label }) => {
+                              const selected = summaryExtraCols.includes(key)
+                              return (
+                                <button
+                                  key={key}
+                                  type="button"
+                                  onClick={() => {
+                                    const next = selected
+                                      ? summaryExtraCols.filter((c) => c !== key)
+                                      : [...summaryExtraCols, key]
+                                    setValue('summary_extra_columns', next.length ? next : null, {
+                                      shouldDirty: true
+                                    })
+                                  }}
+                                  className={cn(
+                                    'rounded-md border px-2.5 py-1 text-xs transition-all',
+                                    selected
+                                      ? 'border-primary bg-primary/5 ring-1 ring-primary font-medium'
+                                      : 'border-border hover:border-muted-foreground/40'
+                                  )}
+                                >
+                                  {label}
+                                </button>
+                              )
+                            })}
+                          </div>
+                        </Field>
                       </>
                     )}
 

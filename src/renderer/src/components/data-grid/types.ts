@@ -160,6 +160,7 @@ export interface DataGridProps<TData> {
   rowSelection?: RowSelectionState
   onRowSelectionChange?: OnChangeFn<RowSelectionState>
   onRowClick?: (row: Row<TData>) => void
+  getRowStyle?: (row: Row<TData>) => React.CSSProperties | undefined
 
   // Column features
   enableColumnResizing?: boolean

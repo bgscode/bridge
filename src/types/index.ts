@@ -148,6 +148,7 @@ export interface JobRow {
   id: number
   name: string
   description: string | null
+  job_color: string | null
   job_group_id: number | null
   /** Repository parses DB JSON text → number[] at runtime */
   connection_ids: number[]
@@ -268,6 +269,10 @@ export interface JobAdaptiveState {
   output_format: 'excel' | 'excel-stream' | 'csv' | null
   /** reason the format was chosen */
   output_reason: string | null
+  /** destination writer progress percentage while output is being written */
+  output_progress_pct?: number | null
+  /** short label for destination writer progress */
+  output_progress_label?: string | null
 }
 
 // ─── Job Run ─────────────────────────────────────────────────────────────────

@@ -51,6 +51,7 @@ function serializeForInsert(data: CreateJobDto): Record<string, unknown> {
   return {
     name: data.name,
     description: data.description ?? null,
+    job_color: data.job_color ?? null,
     job_group_id: data.job_group_id ?? null,
     connection_ids: JSON.stringify(data.connection_ids ?? []),
     online_only: data.online_only ? 1 : 0,
@@ -78,6 +79,7 @@ function serializeForInsert(data: CreateJobDto): Record<string, unknown> {
 const KNOWN_COLUMNS = new Set([
   'name',
   'description',
+  'job_color',
   'job_group_id',
   'connection_ids',
   'online_only',
@@ -147,7 +149,7 @@ export const jobRepository = {
     const serialized = serializeForInsert(data)
     const result = db
       .prepare(
-        'INSERT INTO jobs (name, description, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, excel_combine_sheets) VALUES (@name, @description, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @excel_combine_sheets)'
+        'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, excel_combine_sheets) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @excel_combine_sheets)'
       )
       .run(serialized)
     return this.findById(result.lastInsertRowid as number)!
@@ -155,7 +157,7 @@ export const jobRepository = {
 
   bulkCreate(data: CreateJobDto[]): JobRow[] {
     const stmt = db.prepare(
-      'INSERT INTO jobs (name, description, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, excel_combine_sheets) VALUES (@name, @description, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @excel_combine_sheets)'
+      'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, excel_combine_sheets) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @excel_combine_sheets)'
     )
     const insertMany = db.transaction((jobs: CreateJobDto[]) => {
       const rows: JobRow[] = []

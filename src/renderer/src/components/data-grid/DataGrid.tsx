@@ -230,6 +230,7 @@ export function DataGrid<TData>(props: DataGridProps<TData>): JSX.Element {
               estimatedRowHeight={estimatedRowHeight}
               selectionMode={selectionMode}
               onRowClick={props.onRowClick}
+              getRowStyle={props.getRowStyle}
               loading={loading}
               emptyMessage={emptyMessage}
               renderEmptyState={renderEmptyState}

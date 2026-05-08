@@ -156,6 +156,14 @@ function JobCard({
     progress.total_connections > 0
       ? Math.round((progress.completed_connections / progress.total_connections) * 100)
       : 0
+  const destinationProgressPct =
+    isRunning && typeof progress.adaptive?.output_progress_pct === 'number'
+      ? Math.max(0, Math.min(100, Math.round(progress.adaptive.output_progress_pct)))
+      : null
+  const destinationProgressLabel =
+    isRunning && progress.adaptive?.output_progress_label
+      ? progress.adaptive.output_progress_label
+      : 'Writing destination'
 
   const elapsed = progress.started_at
     ? Math.round(
@@ -312,6 +320,18 @@ function JobCard({
             isFailed && '*:data-[slot=progress-indicator]:bg-destructive'
           )}
         />
+        {destinationProgressPct !== null && (
+          <div className="mt-2 space-y-1">
+            <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+              <span className="truncate">{destinationProgressLabel}</span>
+              <span>{destinationProgressPct}%</span>
+            </div>
+            <Progress
+              value={destinationProgressPct}
+              className="h-1 *:data-[slot=progress-indicator]:bg-sky-500"
+            />
+          </div>
+        )}
       </div>
 
       {/* Adaptive engine indicator */}

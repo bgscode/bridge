@@ -1,4 +1,12 @@
-import { JSX, type SetStateAction, useCallback, useLayoutEffect, useRef, useState } from 'react'
+import {
+  JSX,
+  type CSSProperties,
+  type SetStateAction,
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState
+} from 'react'
 import type { RowSelectionState } from '@tanstack/react-table'
 import { BriefcaseBusiness, Play, Plus, RotateCcw, Trash2, Variable } from 'lucide-react'
 
@@ -27,6 +35,102 @@ const statusVariant: Record<JobRow['status'], 'default' | 'secondary' | 'outline
     success: 'outline',
     failed: 'destructive'
   }
+
+function normalizeHexColor(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const trimmed = value.trim()
+
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return trimmed.toLowerCase()
+  }
+
+  const shortHex = trimmed.match(/^#([0-9a-fA-F]{3})$/)
+
+  if (!shortHex) {
+    return null
+  }
+
+  const [red, green, blue] = shortHex[1].split('')
+
+  return `#${red}${red}${green}${green}${blue}${blue}`.toLowerCase()
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const normalized = normalizeHexColor(hex)
+
+  if (!normalized) {
+    return 'transparent'
+  }
+
+  const red = Number.parseInt(normalized.slice(1, 3), 16)
+  const green = Number.parseInt(normalized.slice(3, 5), 16)
+  const blue = Number.parseInt(normalized.slice(5, 7), 16)
+  const opacity = Math.min(Math.max(alpha, 0), 1)
+
+  return `rgba(${red}, ${green}, ${blue}, ${opacity})`
+}
+
+function getJobRowTintStyle(job: JobRow): CSSProperties | undefined {
+  const color = normalizeHexColor(job.job_color)
+
+  if (!color) {
+    return undefined
+  }
+
+  return {
+    ['--data-grid-row-bg' as '--data-grid-row-bg']: hexToRgba(color, 0.3),
+    ['--data-grid-row-hover-bg' as '--data-grid-row-hover-bg']: hexToRgba(color, 0.38),
+    ['--data-grid-row-pinned-bg' as '--data-grid-row-pinned-bg']: `color-mix(in srgb, ${color} 16%, var(--color-background))`,
+    ['--data-grid-row-pinned-hover-bg' as '--data-grid-row-pinned-hover-bg']: `color-mix(in srgb, ${color} 22%, var(--color-background))`
+  } as CSSProperties
+}
+
+function hasJobTint(job: JobRow): boolean {
+  return normalizeHexColor(job.job_color) !== null
+}
+
+function getTintedNeutralBadgeClass(job: JobRow): string | undefined {
+  if (!hasJobTint(job)) {
+    return undefined
+  }
+
+  return 'border-slate-900/12 bg-white/86 text-slate-950 shadow-sm'
+}
+
+function getTintedTypeBadgeClass(job: JobRow): string | undefined {
+  if (!hasJobTint(job)) {
+    return undefined
+  }
+
+  return job.type === 'query'
+    ? 'border border-slate-950/8 bg-slate-950 text-white shadow-sm'
+    : 'border border-slate-900/12 bg-white/88 text-slate-950 shadow-sm'
+}
+
+function getTintedStatusBadgeClass(job: JobRow): string | undefined {
+  if (!hasJobTint(job)) {
+    return undefined
+  }
+
+  switch (job.status) {
+    case 'success':
+      return 'border-emerald-700/20 bg-emerald-50/92 text-emerald-800 shadow-sm'
+    case 'failed':
+      return 'border-red-700/18 bg-red-50/92 text-red-700 shadow-sm'
+    case 'running':
+      return 'border-sky-700/18 bg-sky-700 text-white shadow-sm'
+    case 'idle':
+    default:
+      return 'border-slate-900/12 bg-white/88 text-slate-700 shadow-sm'
+  }
+}
+
+function getTintedMutedTextClass(job: JobRow): string {
+  return hasJobTint(job) ? 'text-slate-700' : 'text-muted-foreground'
+}
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -77,6 +181,7 @@ export default function JobsPage(): JSX.Element {
     const dto: CreateJobDto = {
       name: values.name,
       description: values.description ?? null,
+      job_color: values.job_color ?? null,
       job_group_id: values.job_group_id ?? null,
       type: values.type,
       online_only: values.online_only,
@@ -93,11 +198,14 @@ export default function JobsPage(): JSX.Element {
       modify_dates: isAction ? true : (values.modify_dates ?? true),
       schedule: values.schedule ?? null,
       summary_extra_columns:
-        !isAction && values.destination_type === 'excel'
+        !isAction &&
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets')
           ? (values.summary_extra_columns ?? null)
           : null,
       excel_combine_sheets:
-        !isAction && values.destination_type === 'excel' && !values.is_multi
+        !isAction &&
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
+        !values.is_multi
           ? (values.excel_combine_sheets ?? false)
           : false
     }
@@ -112,6 +220,7 @@ export default function JobsPage(): JSX.Element {
     create({
       name: `${job.name} (Copy)`,
       description: job.description,
+      job_color: job.job_color,
       job_group_id: job.job_group_id,
       type: job.type,
       online_only: job.online_only,
@@ -165,14 +274,21 @@ export default function JobsPage(): JSX.Element {
     {
       accessorKey: 'name',
       header: 'Name',
-      cell: ({ row }) => <Badge variant="outline">{row.original.name}</Badge>,
+      cell: ({ row }) => (
+        <Badge variant="outline" className={getTintedNeutralBadgeClass(row.original)}>
+          {row.original.name}
+        </Badge>
+      ),
       meta: { filterType: 'text', resizable: true }
     },
     {
       accessorKey: 'type',
       header: 'Type',
       cell: ({ row }) => (
-        <Badge variant={row.original.type === 'query' ? 'default' : 'secondary'}>
+        <Badge
+          variant={row.original.type === 'query' ? 'default' : 'secondary'}
+          className={getTintedTypeBadgeClass(row.original)}
+        >
           {row.original.type}
         </Badge>
       ),
@@ -188,7 +304,9 @@ export default function JobsPage(): JSX.Element {
       cell: ({ row }) => {
         const groupName =
           jobGroups.find((g) => g.id === row.original.job_group_id)?.name ?? 'Ungrouped'
-        return <span className="text-sm text-muted-foreground">{groupName}</span>
+        return (
+          <span className={`text-sm ${getTintedMutedTextClass(row.original)}`}>{groupName}</span>
+        )
       },
       meta: { filterType: 'text', resizable: true }
     },
@@ -196,7 +314,12 @@ export default function JobsPage(): JSX.Element {
       accessorKey: 'status',
       header: 'Status',
       cell: ({ row }) => (
-        <Badge variant={statusVariant[row.original.status]}>{row.original.status}</Badge>
+        <Badge
+          variant={statusVariant[row.original.status]}
+          className={getTintedStatusBadgeClass(row.original)}
+        >
+          {row.original.status}
+        </Badge>
       ),
       meta: { filterType: 'text', resizable: true }
     },
@@ -204,7 +327,7 @@ export default function JobsPage(): JSX.Element {
       accessorKey: 'online_only',
       header: 'Online Only',
       cell: ({ row }) => (
-        <span className="text-sm text-muted-foreground">
+        <span className={`text-sm ${getTintedMutedTextClass(row.original)}`}>
           {row.original.online_only ? 'Yes' : 'No'}
         </span>
       ),
@@ -214,7 +337,7 @@ export default function JobsPage(): JSX.Element {
       accessorKey: 'is_multi',
       header: 'Multi',
       cell: ({ row }) => (
-        <span className="text-sm text-muted-foreground">
+        <span className={`text-sm ${getTintedMutedTextClass(row.original)}`}>
           {row.original.is_multi ? 'Yes' : 'No'}
         </span>
       ),
@@ -224,7 +347,7 @@ export default function JobsPage(): JSX.Element {
       accessorKey: 'last_run_at',
       header: 'Last Run',
       cell: ({ row }) => (
-        <span className="text-sm text-muted-foreground">
+        <span className={`text-sm ${getTintedMutedTextClass(row.original)}`}>
           {row.original.last_run_at ? formatUtcToIst(row.original.last_run_at) : '—'}
         </span>
       ),
@@ -235,7 +358,7 @@ export default function JobsPage(): JSX.Element {
       header: 'Last Error',
       cell: ({ row }) => (
         <span
-          className="text-sm text-muted-foreground truncate max-w-xs"
+          className={`text-sm truncate max-w-xs ${getTintedMutedTextClass(row.original)}`}
           title={row.original.last_error || ''}
         >
           {row.original.last_error || '—'}
@@ -247,7 +370,9 @@ export default function JobsPage(): JSX.Element {
       accessorKey: 'description',
       header: 'Description',
       cell: ({ row }) => (
-        <span className="text-sm text-muted-foreground">{row.original.description || '—'}</span>
+        <span className={`text-sm ${getTintedMutedTextClass(row.original)}`}>
+          {row.original.description || '—'}
+        </span>
       ),
       meta: { filterType: 'text', resizable: true }
     },
@@ -346,6 +471,7 @@ export default function JobsPage(): JSX.Element {
             className="flex-1 rounded-none border-0"
             enableColumnResizing={true}
             getRowId={(row) => String(row.id)}
+            getRowStyle={(row) => getJobRowTintStyle(row.original)}
             rowSelection={rowSelection}
             onRowSelectionChange={handleRowSelectionChange}
             toolbar={{

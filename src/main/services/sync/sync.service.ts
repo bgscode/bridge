@@ -209,11 +209,30 @@ async function pushAll(token: string) {
           return []
         }
       })()
+      const lastFailedConnectionIds: number[] = (() => {
+        try {
+          return JSON.parse((r.last_failed_connection_ids as string) ?? '[]') as number[]
+        } catch {
+          return []
+        }
+      })()
+      const lastConnectionErrors: { id: number; name: string; error: string }[] = (() => {
+        try {
+          return JSON.parse((r.last_connection_errors as string) ?? '[]') as {
+            id: number
+            name: string
+            error: string
+          }[]
+        } catch {
+          return []
+        }
+      })()
       return {
         localId: r.id as number,
         remoteId: (r.remote_id as string | null) ?? undefined,
         name: String(r.name),
         description: (r.description as string | null) ?? null,
+        job_color: (r.job_color as string | null) ?? null,
         jobGroupLocalId: (r.job_group_id as number | null) ?? null,
         jobGroupRemoteId: r.job_group_id ? jgRemote[r.job_group_id as number] : undefined,
         connectionLocalIds: connIds,
@@ -239,7 +258,9 @@ async function pushAll(token: string) {
             return null
           }
         })(),
-        excel_combine_sheets: Boolean(r.excel_combine_sheets)
+        excel_combine_sheets: Boolean(r.excel_combine_sheets),
+        last_failed_connection_ids: lastFailedConnectionIds,
+        last_connection_errors: lastConnectionErrors
       }
     }),
     jobVariables: local.jobVariables.map((v) => ({
@@ -331,6 +352,7 @@ type RemoteJob = RemoteBase & {
   name: string
   ownerId: string
   description: string | null
+  jobColor: string | null
   jobGroupId: string | null
   connectionIds: string[]
   onlineOnly: boolean
@@ -348,6 +370,8 @@ type RemoteJob = RemoteBase & {
   status: string
   lastRunAt: string | null
   lastError: string | null
+  lastFailedConnectionIds: number[] | null
+  lastConnectionErrors: Array<{ id: number; name: string; error: string }> | null
   modifyDates: boolean | null
   summaryExtraColumns: string[] | null
   excelCombineSheets: boolean | null
@@ -525,14 +549,16 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
   const findJob = db.prepare('SELECT id FROM jobs WHERE remote_id = ?')
   const insertJob = db.prepare(`
     INSERT INTO jobs (
-      name, description, job_group_id, connection_ids, online_only, is_multi,
+      name, description, job_color, job_group_id, connection_ids, online_only, is_multi,
       type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook,
       template_path, template_mode, schedule, status, last_run_at, last_error,
+      last_failed_connection_ids, last_connection_errors,
       modify_dates, summary_extra_columns, excel_combine_sheets, remote_id
     ) VALUES (
-      @name, @description, @job_group_id, @connection_ids, @online_only, @is_multi,
+      @name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi,
       @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook,
       @template_path, @template_mode, @schedule, @status, @last_run_at, @last_error,
+      @last_failed_connection_ids, @last_connection_errors,
       @modify_dates, @summary_extra_columns, @excel_combine_sheets, @remote_id
     )
   `)
@@ -540,6 +566,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
     UPDATE jobs SET
       name = @name,
       description = @description,
+      job_color = @job_color,
       job_group_id = @job_group_id,
       connection_ids = @connection_ids,
       online_only = @online_only,
@@ -557,6 +584,8 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       status = @status,
       last_run_at = @last_run_at,
       last_error = @last_error,
+      last_failed_connection_ids = @last_failed_connection_ids,
+      last_connection_errors = @last_connection_errors,
       modify_dates = @modify_dates,
       summary_extra_columns = @summary_extra_columns,
       excel_combine_sheets = @excel_combine_sheets,
@@ -582,6 +611,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       const params = {
         name: r.name,
         description: r.description,
+        job_color: r.jobColor ?? null,
         job_group_id: r.jobGroupId ? (jgLocal.get(r.jobGroupId) ?? null) : null,
         connection_ids: JSON.stringify(localConnIds),
         online_only: r.onlineOnly ? 1 : 0,
@@ -599,6 +629,8 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
         status: r.status,
         last_run_at: r.lastRunAt,
         last_error: r.lastError,
+        last_failed_connection_ids: JSON.stringify(r.lastFailedConnectionIds ?? []),
+        last_connection_errors: JSON.stringify(r.lastConnectionErrors ?? []),
         modify_dates: r.modifyDates != null ? (r.modifyDates ? 1 : 0) : 1,
         summary_extra_columns: r.summaryExtraColumns ? JSON.stringify(r.summaryExtraColumns) : null,
         excel_combine_sheets: r.excelCombineSheets ? 1 : 0,

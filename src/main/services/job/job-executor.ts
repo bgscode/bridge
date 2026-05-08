@@ -25,7 +25,12 @@ import { getAdaptiveBrain, type HealthSnapshot } from './adaptive-brain'
 import { decideOutputFormat } from './output-decision'
 import { runActionJob } from './action-executor'
 import { formatUtcToIst } from '../../utils/format-date'
-import { writeToGoogleSheets } from './gsheet-writer'
+import {
+  buildGoogleSheetBucketTargets,
+  writeToGoogleSheets,
+  type GsheetBucket,
+  type GoogleSheetBucketTarget
+} from './gsheet-writer'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -2410,6 +2415,190 @@ function writeSummarySheet(
   })
 }
 
+function buildGoogleSheetsSummaryRows(
+  jobName: string,
+  progress: JobProgress,
+  connections: ConnectionRow[] = [],
+  bucketTargets: GoogleSheetBucketTarget[] = [],
+  summaryExtraColumns: string[] = []
+): Array<Array<string | number | boolean>> {
+  const startedAt = progress.started_at
+  const finishedAt = progress.finished_at ?? new Date().toISOString()
+  const durationSeconds = Math.max(
+    0,
+    Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1000)
+  )
+  const successCount = progress.total_connections - progress.failed_connections
+  const errorRate =
+    progress.total_connections > 0
+      ? Math.round((progress.failed_connections / progress.total_connections) * 100)
+      : 0
+
+  const bucketByConnectionId = new Map<number, GoogleSheetBucketTarget>()
+  for (const target of bucketTargets) {
+    if (
+      typeof target.bucket.connectionId === 'number' &&
+      !bucketByConnectionId.has(target.bucket.connectionId)
+    ) {
+      bucketByConnectionId.set(target.bucket.connectionId, target)
+    }
+  }
+
+  const extraColKeys = summaryExtraColumns.filter(Boolean)
+  const needsGroupLookup = extraColKeys.includes('group_name')
+  const needsStoreLookup = extraColKeys.includes('store_name')
+  const needsFiscalLookup = extraColKeys.includes('fiscal_year_name')
+
+  const groupMap = new Map<number, string>()
+  const storeMap = new Map<number, string>()
+  const fiscalYearMap = new Map<number, string>()
+
+  if (needsGroupLookup) {
+    for (const group of groupRepository.findAll()) groupMap.set(group.id, group.name)
+  }
+  if (needsStoreLookup) {
+    for (const store of storeRepository.findAll()) storeMap.set(store.id, store.name)
+  }
+  if (needsFiscalLookup) {
+    for (const fiscalYear of fiscalYearRepository.findAll()) {
+      fiscalYearMap.set(fiscalYear.id, fiscalYear.name)
+    }
+  }
+
+  function getExtraValues(connId: number): string[] {
+    const conn = connections.find((connection) => connection.id === connId)
+    if (!conn || extraColKeys.length === 0) return []
+
+    return extraColKeys.map((key) => {
+      switch (key) {
+        case 'group_name':
+          return conn.group_id ? (groupMap.get(conn.group_id) ?? '') : ''
+        case 'store_name':
+          return conn.store_id ? (storeMap.get(conn.store_id) ?? '') : ''
+        case 'fiscal_year_name':
+          return conn.fiscal_year_id ? (fiscalYearMap.get(conn.fiscal_year_id) ?? '') : ''
+        case 'static_ip':
+          return conn.static_ip ?? ''
+        case 'vpn_ip':
+          return conn.vpn_ip ?? ''
+        case 'db_name':
+          return conn.db_name ?? ''
+        default:
+          return ''
+      }
+    })
+  }
+
+  const extraColumnLabels = extraColKeys.map((key) => {
+    const labels: Record<string, string> = {
+      group_name: 'Group',
+      store_name: 'Store',
+      fiscal_year_name: 'Fiscal Year',
+      static_ip: 'Static IP',
+      vpn_ip: 'VPN IP',
+      db_name: 'Database'
+    }
+
+    return labels[key] ?? key
+  })
+
+  const headers = [
+    'Connection',
+    'Sheet Name',
+    ...extraColumnLabels,
+    'Status',
+    'Rows',
+    'Started At',
+    'Finished At',
+    'Duration (s)',
+    'Error Category',
+    'Failure Reason'
+  ]
+  const blankRow = headers.map(() => '')
+  const rows: Array<Array<string | number | boolean>> = [headers]
+
+  rows.push([
+    `Job: ${jobName}`,
+    '',
+    ...extraColKeys.map(() => ''),
+    progress.status,
+    progress.total_rows,
+    formatUtcToIst(startedAt),
+    formatUtcToIst(finishedAt),
+    durationSeconds,
+    categorizeError(progress.error),
+    progress.error ?? ''
+  ])
+
+  rows.push([
+    `Summary: ${successCount}/${progress.total_connections} successful`,
+    '',
+    ...extraColKeys.map(() => ''),
+    progress.failed_connections > 0 ? 'partial' : 'ok',
+    progress.total_rows,
+    '',
+    '',
+    '',
+    `${errorRate}% Error Rate`,
+    progress.failed_connections > 0 ? `${progress.failed_connections} connection(s) failed` : ''
+  ])
+
+  rows.push(blankRow)
+
+  for (const conn of progress.connections) {
+    const bucketTarget = bucketByConnectionId.get(conn.connection_id)
+    const connDuration =
+      conn.started_at && conn.finished_at
+        ? Math.max(
+            0,
+            Math.round(
+              (new Date(conn.finished_at).getTime() - new Date(conn.started_at).getTime()) / 1000
+            )
+          )
+        : 0
+    const failureReason = conn.error ?? bucketTarget?.bucket.error ?? ''
+
+    rows.push([
+      conn.connection_name,
+      bucketTarget?.tabName ?? '',
+      ...getExtraValues(conn.connection_id),
+      conn.status,
+      bucketTarget?.bucket.rowCount ?? conn.rows,
+      formatUtcToIst(conn.started_at),
+      formatUtcToIst(conn.finished_at),
+      connDuration,
+      categorizeError(failureReason),
+      failureReason
+    ])
+  }
+
+  return rows
+}
+
+function estimateGoogleSheetBucketWriteRows(bucket: GsheetBucket): number {
+  return Math.max(bucket.rowCount ?? 0, 1) + 1
+}
+
+function estimateGoogleSheetTotalWriteRows(args: {
+  buckets: GsheetBucket[]
+  combineSheets: boolean
+  summaryRows: Array<Array<string | number | boolean>>
+}): number {
+  const bucketRows = args.buckets.reduce(
+    (total, bucket) => total + estimateGoogleSheetBucketWriteRows(bucket),
+    0
+  )
+  const combinedDataRows = args.combineSheets
+    ? Math.max(
+        args.buckets.reduce((total, bucket) => total + Math.max(bucket.rowCount ?? 0, 0), 0),
+        1
+      ) + 1
+    : 0
+  const summaryRows = args.summaryRows.length
+
+  return bucketRows + combinedDataRows + summaryRows
+}
+
 // ─── CSV writer (for large datasets / backpressure fallback) ─────────────────
 
 /**
@@ -3046,7 +3235,9 @@ export async function runJob(
     output_format: isExcelDestination ? 'excel-stream' : null,
     output_reason: isExcelDestination
       ? 'excel destination — streaming workbook'
-      : initialFormatDecision.reason
+      : initialFormatDecision.reason,
+    output_progress_pct: null,
+    output_progress_label: null
   }
 
   const updateAdaptiveState = (): void => {
@@ -3063,7 +3254,9 @@ export async function runJob(
       active_workers: activeWorkers,
       target_workers: targetWorkers,
       output_format: progress.adaptive?.output_format ?? null,
-      output_reason: progress.adaptive?.output_reason ?? null
+      output_reason: progress.adaptive?.output_reason ?? null,
+      output_progress_pct: progress.adaptive?.output_progress_pct ?? null,
+      output_progress_label: progress.adaptive?.output_progress_label ?? null
     }
   }
 
@@ -3509,6 +3702,8 @@ export async function runJob(
       } else if (job.destination_type === 'google_sheets') {
         if (progress.adaptive) {
           progress.adaptive.reason = 'writing google sheets output'
+          progress.adaptive.output_progress_pct = 0
+          progress.adaptive.output_progress_label = 'Preparing Google Sheets tabs'
           throttled.emit(progress)
         }
         const buckets = listOutputBuckets(
@@ -3517,31 +3712,71 @@ export async function runJob(
           isMultiQuery ? (job.sql_query_names ?? []) : [],
           allBucketMeta
         )
+        const googleSheetBuckets: GsheetBucket[] = buckets.map((bucket) => ({
+          label: bucket.label,
+          columns: bucket.columns,
+          error: bucket.error,
+          chunkFiles: bucket.chunkFiles,
+          connectionId: bucket.connection?.id ?? null,
+          rowCount: bucket.rows
+        }))
+        const shouldCreateCombinedSheet = job.excel_combine_sheets && !isMultiQuery
+        const reservedGoogleSheetTabs = shouldCreateCombinedSheet
+          ? ['Data', 'Summary']
+          : ['Summary']
+        const googleSheetBucketTargets = buildGoogleSheetBucketTargets(
+          googleSheetBuckets,
+          reservedGoogleSheetTabs
+        )
+        const googleSheetSummaryRows = buildGoogleSheetsSummaryRows(
+          job.name,
+          progress,
+          connections,
+          googleSheetBucketTargets,
+          job.summary_extra_columns ?? []
+        )
+        const googleSheetTotalWriteRows = estimateGoogleSheetTotalWriteRows({
+          buckets: googleSheetBuckets,
+          combineSheets: shouldCreateCombinedSheet,
+          summaryRows: googleSheetSummaryRows
+        })
+        const googleSheetWriteProgress = new Map<
+          string,
+          { rowsWritten: number; totalRowsForBucket: number }
+        >()
         const sheetUrl = await writeToGoogleSheets({
           configJson: effectiveDestinationConfig as string,
           operation: (job.operation as 'append' | 'replace' | null) ?? null,
-          buckets: buckets.map((b) => ({
-            label: b.label,
-            columns: b.columns,
-            error: b.error,
-            chunkFiles: b.chunkFiles
-          })),
+          buckets: googleSheetBuckets,
           readChunk: readChunkFromFile,
-          combineSheets: job.excel_combine_sheets && !isMultiQuery,
+          combineSheets: shouldCreateCombinedSheet,
           jobProgress: progress,
+          summaryRows: googleSheetSummaryRows,
           onProgress: ({ bucket, rowsWritten, totalRowsForBucket }) => {
+            googleSheetWriteProgress.set(bucket, { rowsWritten, totalRowsForBucket })
+            const totalWritten = Array.from(googleSheetWriteProgress.values()).reduce(
+              (sum, entry) => sum + Math.min(entry.rowsWritten, entry.totalRowsForBucket),
+              0
+            )
+            const pct =
+              googleSheetTotalWriteRows > 0
+                ? Math.min(100, Math.round((totalWritten / googleSheetTotalWriteRows) * 100))
+                : 0
+
             if (progress.adaptive) {
-              const pct =
-                totalRowsForBucket > 0
-                  ? Math.min(100, Math.round((rowsWritten / totalRowsForBucket) * 100))
-                  : 0
-              progress.adaptive.reason = `gsheet "${bucket}" ${pct}% (${rowsWritten.toLocaleString()} rows)`
+              progress.adaptive.reason = `gsheet ${pct}% (${totalWritten.toLocaleString()}/${googleSheetTotalWriteRows.toLocaleString()} rows)`
+              progress.adaptive.output_progress_pct = pct
+              progress.adaptive.output_progress_label = `Writing Google Sheets: ${bucket}`
             }
             throttled.emit(progress)
           }
         })
         progress.output_path = sheetUrl
-        if (progress.adaptive) progress.adaptive.reason = 'google sheets output complete'
+        if (progress.adaptive) {
+          progress.adaptive.reason = 'google sheets output complete'
+          progress.adaptive.output_progress_pct = 100
+          progress.adaptive.output_progress_label = 'Google Sheets complete'
+        }
       }
     } catch (err) {
       // Cancellation no longer interrupts the writer mid-flight (writers
