@@ -2220,7 +2220,40 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                           </div>
                         </Field>
 
-                        {/* Combine sheets — single-query only — shown above for all destinations */}
+                        {/* Combine sheets — single-query only */}
+                        {!isMulti && (
+                          <div className="flex items-center justify-between rounded-lg border border-dashed px-3 py-2">
+                            <div>
+                              <p className="text-xs font-medium">Combine into one sheet</p>
+                              <p className="text-xs text-muted-foreground">
+                                Stack all connections in a single &quot;Data&quot; sheet with
+                                section headers
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={excelCombineSheets}
+                              onClick={() =>
+                                setValue('excel_combine_sheets', !excelCombineSheets, {
+                                  shouldDirty: true
+                                })
+                              }
+                              className={cn(
+                                'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent',
+                                'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                                excelCombineSheets ? 'bg-primary' : 'bg-input'
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  'pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform',
+                                  excelCombineSheets ? 'translate-x-4' : 'translate-x-0'
+                                )}
+                              />
+                            </button>
+                          </div>
+                        )}
                       </div>
                     )}
 
