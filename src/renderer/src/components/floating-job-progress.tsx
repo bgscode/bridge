@@ -463,7 +463,14 @@ function JobCard({
 function useDraggable(
   initialPos: { x: number; y: number },
   containerRef: React.RefObject<HTMLDivElement | null>
-) {
+): {
+  pos: { x: number; y: number }
+  handlers: {
+    onPointerDown: (e: React.PointerEvent) => void
+    onPointerMove: (e: React.PointerEvent) => void
+    onPointerUp: (e: React.PointerEvent) => void
+  }
+} {
   const [pos, setPos] = useState(initialPos)
   const dragging = useRef(false)
   const offset = useRef({ x: 0, y: 0 })

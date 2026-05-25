@@ -1385,11 +1385,28 @@ async function writeStreamingExcelCombined(
   connections: ConnectionRow[],
   allChunkFiles: Map<string, string[]>,
   summaryExtraColumns: string[] = [],
-  modifyDates = true
+  modifyDates = true,
+  template?: {
+    templatePath: string | null
+    templateMode: 'new' | 'existing' | null
+  }
 ): Promise<string> {
+  const templatePath = template?.templatePath ?? null
+  const templateMode = template?.templateMode ?? null
+  const templateExists = Boolean(templatePath) && fs.existsSync(templatePath!)
+  const hasTemplate = templateExists && Boolean(templateMode)
+
   let filePath: string
-  if (isDirectoryPath(destPath)) {
-    const fileName = `${sanitizeFileName(jobName)}_${fileTimestamp()}.xlsx`
+  if (hasTemplate && templateMode === 'existing') {
+    // Write data INTO the template file itself — same as non-combine mode.
+    filePath = templatePath!
+  } else if (isDirectoryPath(destPath)) {
+    // When template is configured but not locally available, use a stable
+    // filename (no timestamp) so every run updates the same output file.
+    const fileName =
+      templateMode === 'existing'
+        ? `${sanitizeFileName(jobName)}.xlsx`
+        : `${sanitizeFileName(jobName)}_${fileTimestamp()}.xlsx`
     const baseDir = fs.existsSync(destPath) ? destPath : appDesktopBaseDir()
     await fs.promises.mkdir(baseDir, { recursive: true })
     filePath = path.join(baseDir, fileName)
@@ -1589,10 +1606,18 @@ async function writeStreamingExcel(
     filePath = templatePath!
     effectiveOp = operation ?? 'replace'
   } else if (isDirectoryPath(destPath)) {
-    const fileName = `${sanitizeFileName(jobName)}_${fileTimestamp()}.xlsx`
     // Try the configured directory first; fall back to Desktop/<AppName>/ if inaccessible.
     const baseDir = fs.existsSync(destPath) ? destPath : appDesktopBaseDir()
     await fs.promises.mkdir(baseDir, { recursive: true })
+    // When a template is configured in "existing" mode but isn't available on this
+    // device (templatePath resolved to null), use a STABLE filename with no timestamp
+    // so every run finds and updates the same output file rather than creating a new
+    // timestamped artefact. When no template is configured, keep the timestamped
+    // name so multiple independent runs don't overwrite each other.
+    const fileName =
+      templateMode === 'existing'
+        ? `${sanitizeFileName(jobName)}.xlsx`
+        : `${sanitizeFileName(jobName)}_${fileTimestamp()}.xlsx`
     filePath = path.join(baseDir, fileName)
     effectiveOp = 'replace'
   } else {
@@ -3628,7 +3653,11 @@ export async function runJob(
                 connections,
                 allChunkFiles,
                 job.summary_extra_columns ?? [],
-                job.modify_dates !== false
+                job.modify_dates !== false,
+                {
+                  templatePath: await resolveMachineLocalTemplatePath(job.template_path, job.name),
+                  templateMode: job.template_mode
+                }
               )
             : await writeStreamingExcel(
                 destPath,

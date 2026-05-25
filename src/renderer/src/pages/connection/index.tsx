@@ -359,7 +359,7 @@ export default function ConnectionPage(): JSX.Element {
 
   // ── Column Definitions ─────────────────────────────────────────────────────
 
-  const columns: DataGridColumnDef<ConnectionRow>[] = [
+  const allColumns: DataGridColumnDef<ConnectionRow>[] = [
     {
       accessorKey: 'name',
       header: 'Name',
@@ -478,6 +478,14 @@ export default function ConnectionPage(): JSX.Element {
       )
     }
   ]
+
+  // User role: only Name + Status columns (no sensitive fields, no actions).
+  const USER_VISIBLE_COLS = new Set(['name', 'status'])
+  const columns = isAdmin
+    ? allColumns
+    : allColumns.filter((c) =>
+        USER_VISIBLE_COLS.has((c as { accessorKey?: string }).accessorKey ?? '')
+      )
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
