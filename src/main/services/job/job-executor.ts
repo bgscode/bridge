@@ -2957,7 +2957,7 @@ async function sendToApiStreaming(
   }
   const url = config.endpoint
   const method = (config.method || 'POST').toUpperCase()
-  const batchSize = config.batch_size || 1000
+  const batchSize = config.batch_size || 5000
 
   let headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (config.headers) {
@@ -3055,8 +3055,14 @@ async function sendBatch(
   conn: ConnectionRow,
   rows: Record<string, unknown>[]
 ): Promise<void> {
+  const store = conn.store_id != null ? storeRepository.findById(conn.store_id) : undefined
   const payload = {
-    connection: { id: conn.id, name: conn.name, database: conn.db_name },
+    connection: {
+      id: conn.id,
+      name: conn.name,
+      database: conn.db_name,
+      store_code: store?.code ?? null
+    },
     rows,
     row_count: rows.length,
     timestamp: new Date().toISOString()
