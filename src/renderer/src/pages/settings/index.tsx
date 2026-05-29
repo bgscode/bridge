@@ -27,7 +27,10 @@ const schema = z.object({
   job_max_retries: z.number().min(0).max(10),
   excel_sheet_row_threshold: z.number().min(1000).max(1_048_576),
   excel_sheet_name_source: z.enum(['connection_name', 'store_name', 'store_code']),
-  excel_create_empty_sheets: z.boolean()
+  excel_create_empty_sheets: z.boolean(),
+  api_batch_size: z.number().min(100).max(50000),
+  gsheet_batch_ranges: z.number().min(1).max(1000),
+  gsheet_batch_cells: z.number().min(10000).max(1000000)
 })
 
 type FormValues = z.infer<typeof schema>
@@ -380,6 +383,57 @@ export default function SettingsPage(): JSX.Element {
                 <option value="store_name">Store Name</option>
                 <option value="store_code">Store Code</option>
               </select>
+            </SettingRow>
+
+            <SettingRow
+              label="API batch size"
+              description="Number of rows sent per HTTP POST request when syncing data to an API destination"
+              badge="default 5000"
+              error={errors.api_batch_size?.message}
+            >
+              <NumberInputWithUnit unit="rows">
+                <Input
+                  type="number"
+                  min={100}
+                  max={50000}
+                  step={100}
+                  className="w-24 text-right tabular-nums"
+                  {...register('api_batch_size', { valueAsNumber: true })}
+                />
+              </NumberInputWithUnit>
+            </SettingRow>
+
+            <SettingRow
+              label="Google Sheets batch ranges"
+              description="Maximum number of ranges per Google Sheets batchUpdate API call"
+              badge="default 10"
+              error={errors.gsheet_batch_ranges?.message}
+            >
+              <Input
+                type="number"
+                min={1}
+                max={100}
+                className="w-20 text-right tabular-nums"
+                {...register('gsheet_batch_ranges', { valueAsNumber: true })}
+              />
+            </SettingRow>
+
+            <SettingRow
+              label="Google Sheets batch cells"
+              description="Maximum number of cells per Google Sheets batchUpdate API call"
+              badge="default 300000"
+              error={errors.gsheet_batch_cells?.message}
+            >
+              <NumberInputWithUnit unit="cells">
+                <Input
+                  type="number"
+                  min={10000}
+                  max={1000000}
+                  step={10000}
+                  className="w-28 text-right tabular-nums"
+                  {...register('gsheet_batch_cells', { valueAsNumber: true })}
+                />
+              </NumberInputWithUnit>
             </SettingRow>
 
             <SettingRow

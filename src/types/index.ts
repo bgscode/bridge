@@ -96,6 +96,21 @@ export interface AppSettings {
    * connections. When false, empty buckets are skipped.
    */
   excel_create_empty_sheets: boolean
+  /**
+   * Number of rows per HTTP POST batch when syncing to an API destination.
+   * Default 5000.
+   */
+  api_batch_size: number
+  /**
+   * Maximum number of ranges per Google Sheets batchUpdate call.
+   * Default 10.
+   */
+  gsheet_batch_ranges: number
+  /**
+   * Maximum number of cells per Google Sheets batchUpdate call.
+   * Default 300000.
+   */
+  gsheet_batch_cells: number
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -111,7 +126,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   job_max_retries: 0,
   excel_sheet_row_threshold: 800000,
   excel_sheet_name_source: 'store_code',
-  excel_create_empty_sheets: true
+  excel_create_empty_sheets: true,
+  api_batch_size: 5000,
+  gsheet_batch_ranges: 10,
+  gsheet_batch_cells: 300000
 }
 
 // ─── Connection ──────────────────────────────────────────────────────────────

@@ -2947,7 +2947,12 @@ async function sendToApiStreaming(
   configJson: string,
   connections: ConnectionRow[],
   allChunkFiles: Map<string, string[]>,
-  onConnectionSuccess?: (connId: number) => Promise<void>
+  onConnectionSuccess?: (connId: number) => Promise<void>,
+  opts?: {
+    batchSize?: number
+    onProgress?: (rowsSent: number, totalRows: number) => void
+    connectionProgress?: JobConnectionProgress[]
+  }
 ): Promise<void> {
   const config = JSON.parse(configJson) as {
     endpoint: string
@@ -2957,7 +2962,7 @@ async function sendToApiStreaming(
   }
   const url = config.endpoint
   const method = (config.method || 'POST').toUpperCase()
-  const batchSize = config.batch_size || 5000
+  const batchSize = config.batch_size || opts?.batchSize || 5000
 
   let headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (config.headers) {
@@ -3019,25 +3024,49 @@ async function sendToApiStreaming(
   }
 
   const buckets = listOutputBuckets(connections, allChunkFiles)
+  let totalRows = 0
+  let rowsSent = 0
+  for (const bucket of buckets) {
+    for (const chunkFile of bucket.chunkFiles) {
+      const rows = await readChunkFromFile(chunkFile)
+      totalRows += rows.length
+    }
+  }
+
+  // Track rows actually sent per connection for the summary
+  const rowsSentPerConn = new Map<number, number>()
+  const bucketsWithConn = buckets.filter((b) => b.connection != null)
+  const lastBucketWithConn = bucketsWithConn[bucketsWithConn.length - 1] ?? null
+
   for (const bucket of buckets) {
     const conn = bucket.connection
     if (!conn) continue
     let batch: Record<string, unknown>[] = []
+    const isLastBucket = bucket === lastBucketWithConn
+
+    const flushBatch = async (isFinal: boolean): Promise<void> => {
+      if (batch.length === 0) return
+      const isVeryLast = isFinal && isLastBucket
+      const summary = isVeryLast
+        ? buildApiConnectionSummary(connections, buckets, rowsSentPerConn, opts?.connectionProgress)
+        : undefined
+      await sendBatch(url, method, headers, conn, batch, summary)
+      rowsSentPerConn.set(conn.id, (rowsSentPerConn.get(conn.id) ?? 0) + batch.length)
+      rowsSent += batch.length
+      opts?.onProgress?.(rowsSent, totalRows)
+      batch = []
+    }
 
     for (const chunkFile of bucket.chunkFiles) {
       const rows = await readChunkFromFile(chunkFile)
       for (const row of rows) {
         batch.push(row)
         if (batch.length >= batchSize) {
-          await sendBatch(url, method, headers, conn, batch)
-          batch = []
+          await flushBatch(false)
         }
       }
     }
-
-    if (batch.length > 0) {
-      await sendBatch(url, method, headers, conn, batch)
-    }
+    await flushBatch(true)
 
     // All batches for this connection sent successfully — fire the callback
     // so the caller can update variables now that data has actually reached
@@ -3048,15 +3077,72 @@ async function sendToApiStreaming(
   }
 }
 
+interface ApiConnectionSummary {
+  connection_id: number
+  connection_name: string
+  store_code: string | null
+  status: 'sent' | 'skipped' | 'error'
+  rows_sent: number
+  rows_collected: number
+  error: string | null
+}
+
+function buildApiConnectionSummary(
+  connections: ConnectionRow[],
+  buckets: OutputBucket[],
+  rowsSentPerConn: Map<number, number>,
+  connectionProgress?: JobConnectionProgress[]
+): ApiConnectionSummary[] {
+  const progressByConn = new Map((connectionProgress ?? []).map((cp) => [cp.connection_id, cp]))
+  const bucketsByConn = new Map<number, OutputBucket[]>()
+  for (const b of buckets) {
+    if (!b.connection) continue
+    const existing = bucketsByConn.get(b.connection.id) ?? []
+    existing.push(b)
+    bucketsByConn.set(b.connection.id, existing)
+  }
+
+  return connections.map((conn) => {
+    const store = conn.store_id != null ? storeRepository.findById(conn.store_id) : undefined
+    const connBuckets = bucketsByConn.get(conn.id) ?? []
+    const cp = progressByConn.get(conn.id)
+    const rowsSent = rowsSentPerConn.get(conn.id) ?? 0
+    const rowsCollected = cp?.rows ?? connBuckets.reduce((s, b) => s + b.rows, 0)
+    const bucketError = connBuckets.find((b) => b.error)?.error ?? null
+    const cpError = cp?.error ?? null
+    const error = bucketError ?? cpError
+
+    let status: ApiConnectionSummary['status']
+    if (error && rowsSent === 0) {
+      status = 'error'
+    } else if (rowsSent > 0) {
+      status = 'sent'
+    } else {
+      status = 'skipped'
+    }
+
+    return {
+      connection_id: conn.id,
+      connection_name: conn.name,
+      store_code: store?.code ?? null,
+      status,
+      rows_sent: rowsSent,
+      rows_collected: rowsCollected,
+      error
+    }
+  })
+}
+
 async function sendBatch(
   url: string,
   method: string,
   headers: Record<string, string>,
   conn: ConnectionRow,
-  rows: Record<string, unknown>[]
+  rows: Record<string, unknown>[],
+  summary?: ApiConnectionSummary[]
 ): Promise<void> {
   const store = conn.store_id != null ? storeRepository.findById(conn.store_id) : undefined
-  const payload = {
+  const payload: Record<string, unknown> = {
     connection: {
       id: conn.id,
       name: conn.name,
@@ -3066,6 +3152,10 @@ async function sendBatch(
     rows,
     row_count: rows.length,
     timestamp: new Date().toISOString()
+  }
+  if (summary) {
+    payload.is_last_batch = true
+    payload.summary = summary
   }
 
   const res = await fetch(url, {
@@ -3684,6 +3774,12 @@ export async function runJob(
 
         progress.output_path = actualPath
       } else if (job.destination_type === 'api') {
+        if (progress.adaptive) {
+          progress.adaptive.reason = 'sending api output'
+          progress.adaptive.output_progress_pct = 0
+          progress.adaptive.output_progress_label = 'Sending to API'
+          throttled.emit(progress)
+        }
         await sendToApiStreaming(
           effectiveDestinationConfig as string,
           connections,
@@ -3732,7 +3828,21 @@ export async function runJob(
                   }
                 }
               }
-            : undefined
+            : undefined,
+          {
+            batchSize: settings.api_batch_size,
+            connectionProgress: progress.connections,
+            onProgress: (rowsSent, totalRows) => {
+              if (progress.adaptive) {
+                const pct =
+                  totalRows > 0 ? Math.min(100, Math.round((rowsSent / totalRows) * 100)) : 0
+                progress.adaptive.reason = `api ${pct}% (${rowsSent.toLocaleString()}/${totalRows.toLocaleString()} rows)`
+                progress.adaptive.output_progress_pct = pct
+                progress.adaptive.output_progress_label = `Sending to API: ${rowsSent.toLocaleString()} rows`
+              }
+              throttled.emit(progress)
+            }
+          }
         )
       } else if (job.destination_type === 'google_sheets') {
         if (progress.adaptive) {
@@ -3787,6 +3897,8 @@ export async function runJob(
           combineSheets: shouldCreateCombinedSheet,
           jobProgress: progress,
           summaryRows: googleSheetSummaryRows,
+          gsheet_batch_ranges: settings.gsheet_batch_ranges,
+          gsheet_batch_cells: settings.gsheet_batch_cells,
           onProgress: ({ bucket, rowsWritten, totalRowsForBucket }) => {
             googleSheetWriteProgress.set(bucket, { rowsWritten, totalRowsForBucket })
             const totalWritten = Array.from(googleSheetWriteProgress.values()).reduce(
