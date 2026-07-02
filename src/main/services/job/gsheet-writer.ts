@@ -48,6 +48,8 @@ export interface WriteToGoogleSheetsOptions {
   combineSheets?: boolean
   jobProgress?: JobProgress
   summaryRows?: unknown[][] | null
+  gsheet_batch_ranges?: number
+  gsheet_batch_cells?: number
 }
 
 interface ServiceAccountCredentials {
@@ -88,6 +90,8 @@ interface PendingValueWrite {
 interface ValueWriteBuffer {
   writes: PendingValueWrite[]
   totalCells: number
+  maxRangesPerBatch: number
+  maxCellsPerBatch: number
 }
 
 export interface GoogleSheetBucketTarget {
@@ -143,7 +147,10 @@ export async function writeToGoogleSheets(opts: WriteToGoogleSheetsOptions): Pro
     version: 'v4',
     auth: auth as JWT
   })
-  const writeBuffer = createValueWriteBuffer()
+  const writeBuffer = createValueWriteBuffer({
+    maxRanges: opts.gsheet_batch_ranges,
+    maxCells: opts.gsheet_batch_cells
+  })
 
   let sheetStates = await getSheetStates(sheets, spreadsheetId)
   const reservedTabs: string[] = []
@@ -989,10 +996,15 @@ async function detectLastUsedRow(args: {
   return lastUsedRow
 }
 
-function createValueWriteBuffer(): ValueWriteBuffer {
+function createValueWriteBuffer(limits?: {
+  maxRanges?: number
+  maxCells?: number
+}): ValueWriteBuffer {
   return {
     writes: [],
-    totalCells: 0
+    totalCells: 0,
+    maxRangesPerBatch: limits?.maxRanges ?? MAX_RANGES_PER_BATCH_WRITE,
+    maxCellsPerBatch: limits?.maxCells ?? MAX_CELLS_PER_BATCH_WRITE
   }
 }
 
@@ -1006,8 +1018,8 @@ async function queueValueWrite(args: {
 
   const shouldFlushFirst =
     writeBuffer.writes.length > 0 &&
-    (writeBuffer.writes.length >= MAX_RANGES_PER_BATCH_WRITE ||
-      writeBuffer.totalCells + write.cellCount > MAX_CELLS_PER_BATCH_WRITE)
+    (writeBuffer.writes.length >= writeBuffer.maxRangesPerBatch ||
+      writeBuffer.totalCells + write.cellCount > writeBuffer.maxCellsPerBatch)
 
   if (shouldFlushFirst) {
     await flushBufferedValueWrites({
