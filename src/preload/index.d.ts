@@ -156,7 +156,7 @@ declare global {
         ) => () => void
       }
       auth: {
-        setContext: (token: string | null, role: string | null) => Promise<void>
+        setContext: (token: string | null, role: string | null, variableEditJobIds?: string[]) => Promise<void>
       }
       jobVariables: {
         getAll: (jobId: number) => Promise<JobVariable[]>
@@ -164,6 +164,11 @@ declare global {
         update: (id: number, data: UpdateJobVariableDto) => Promise<JobVariable | undefined>
         delete: (id: number) => Promise<boolean>
         setValue: (jobVariableId: number, connectionId: number, value: string) => Promise<boolean>
+        setJobValue: (
+          jobVariableId: number,
+          connectionIds: number[],
+          value: string
+        ) => Promise<JobVariable | undefined>
         deleteConnectionValues: (jobId: number, connectionId: number) => Promise<boolean>
       }
     }

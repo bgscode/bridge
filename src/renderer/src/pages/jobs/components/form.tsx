@@ -476,6 +476,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const { stores } = useStores()
   const { fiscalYears } = useFiscalYears()
   const wasOpenRef = useRef(false)
+  const formInitializedKeyRef = useRef<string | null>(null)
   const skipAutoSaveOnCloseRef = useRef(false)
   const preserveStagedOnCloseRef = useRef(false)
   const createDraft = usePersistentDraft<JobFormValues>('jobs:create:form:draft:v1')
@@ -641,14 +642,25 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   }, [isOpen, jobId])
 
   useEffect(() => {
-    if (isOpen) {
-      if (mode === 'create') {
-        const draft = createDraft.readDraft()
-        reset(draft ? { ...DEFAULT_FORM_VALUES, ...normalizeJobDraft(draft) } : DEFAULT_FORM_VALUES)
-        return
-      }
+    if (!isOpen) {
+      formInitializedKeyRef.current = null
+      return
+    }
 
-      // Parse destination_config back into sub-fields when editing
+    // Only seed the form when the dialog opens or the edit target changes.
+    // The parent passes a new `data` object reference on every render, so we
+    // must not reset on every `data` change while the user is editing.
+    const sessionKey = mode === 'create' ? 'create' : `edit:${data?.id ?? 'none'}`
+    if (formInitializedKeyRef.current === sessionKey) return
+    formInitializedKeyRef.current = sessionKey
+
+    if (mode === 'create') {
+      const draft = createDraft.readDraft()
+      reset(draft ? { ...DEFAULT_FORM_VALUES, ...normalizeJobDraft(draft) } : DEFAULT_FORM_VALUES)
+      return
+    }
+
+    // Parse destination_config back into sub-fields when editing
       let api_endpoint = '',
         api_method: 'GET' | 'POST' | 'PUT' | 'PATCH' = 'POST',
         api_headers = ''
@@ -746,7 +758,6 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         // Parse schedule JSON back into sub-fields
         ...parseSchedule(data?.schedule_raw)
       })
-    }
   }, [isOpen, mode, data, reset, createDraft])
 
   useEffect(() => {

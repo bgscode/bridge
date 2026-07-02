@@ -1,6 +1,6 @@
 import { JSX, useEffect, useState } from 'react'
-import { RefreshCw, Trash2, Edit2, Check, X } from 'lucide-react'
-import type { JobVariable, JobVariableValue, ConnectionRow } from '@shared/index'
+import { RefreshCw, Check, X } from 'lucide-react'
+import type { JobVariable, ConnectionRow } from '@shared/index'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -19,13 +19,30 @@ interface JobVariablesPanelProps {
   onOpenChange: (open: boolean) => void
   jobId: number
   jobName: string
+  jobRemoteId?: string | null
+  canEdit: boolean
   connections: ConnectionRow[]
 }
 
-interface EditState {
-  jobVariableId: number
-  connectionId: number
-  value: string
+function effectiveValue(variable: JobVariable, connectionId: number): string {
+  const stored = variable.values.find((value) => value.connection_id === connectionId)
+  return stored?.value ?? variable.default_value ?? ''
+}
+
+function getJobWideDisplayValue(variable: JobVariable, connectionIds: number[]): string {
+  if (connectionIds.length === 0) return variable.default_value ?? ''
+
+  const values = connectionIds.map((id) => effectiveValue(variable, id))
+  const first = values[0] ?? ''
+  if (values.every((value) => value === first)) return first
+  return variable.default_value ?? first
+}
+
+function connectionsHaveMixedValues(variable: JobVariable, connectionIds: number[]): boolean {
+  if (connectionIds.length <= 1) return false
+  const values = connectionIds.map((id) => effectiveValue(variable, id))
+  const first = values[0]
+  return values.some((value) => value !== first)
 }
 
 export function JobVariablesPanel({
@@ -33,13 +50,16 @@ export function JobVariablesPanel({
   onOpenChange,
   jobId,
   jobName,
+  canEdit,
   connections
 }: JobVariablesPanelProps): JSX.Element {
   const [variables, setVariables] = useState<JobVariable[]>([])
   const [loading, setLoading] = useState(false)
-  const [editState, setEditState] = useState<EditState | null>(null)
+  const [editingVariableId, setEditingVariableId] = useState<number | null>(null)
+  const [draftValue, setDraftValue] = useState('')
+  const [savingVariableId, setSavingVariableId] = useState<number | null>(null)
 
-  const connById = new Map(connections.map((c) => [c.id, c]))
+  const connectionIds = connections.map((connection) => connection.id)
 
   async function load(): Promise<void> {
     setLoading(true)
@@ -58,41 +78,34 @@ export function JobVariablesPanel({
       void load()
     } else {
       setVariables([])
-      setEditState(null)
+      setEditingVariableId(null)
+      setDraftValue('')
+      setSavingVariableId(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, jobId])
 
-  /** Connections whose ID appears in the job's connection list */
-  const jobConnIds = new Set(connections.map((c) => c.id))
-
-  async function saveEdit(): Promise<void> {
-    if (!editState) return
-    await window.api.jobVariables.setValue(
-      editState.jobVariableId,
-      editState.connectionId,
-      editState.value
-    )
-    setEditState(null)
-    void load()
+  function startEdit(variable: JobVariable): void {
+    setEditingVariableId(variable.id)
+    setDraftValue(getJobWideDisplayValue(variable, connectionIds))
   }
 
-  async function deleteConnValues(connectionId: number): Promise<void> {
-    await window.api.jobVariables.deleteConnectionValues(jobId, connectionId)
-    void load()
+  async function saveJobWideValue(variableId: number): Promise<void> {
+    setSavingVariableId(variableId)
+    try {
+      await window.api.jobVariables.setJobValue(variableId, connectionIds, draftValue)
+      setEditingVariableId(null)
+      setDraftValue('')
+      await load()
+    } finally {
+      setSavingVariableId(null)
+    }
   }
-
-  // Collect all connection IDs that have stored values (includes orphans)
-  const allConnIds = new Set<number>()
-  for (const v of variables) {
-    for (const val of v.values) allConnIds.add(val.connection_id)
-  }
-  const orphanConnIds = Array.from(allConnIds).filter((id) => !jobConnIds.has(id))
 
   if (variables.length === 0 && !loading) {
     return (
       <Sheet open={isOpen} onOpenChange={onOpenChange}>
-        <SheetContent className="w-full sm:max-w-2xl flex flex-col h-full p-0">
+        <SheetContent className="w-full sm:max-w-lg flex flex-col h-full p-0">
           <SheetHeader className="px-6 pt-6 pb-4 border-b shrink-0">
             <SheetTitle>Job Variables</SheetTitle>
             <SheetDescription>{jobName}</SheetDescription>
@@ -107,7 +120,7 @@ export function JobVariablesPanel({
 
   return (
     <Sheet open={isOpen} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-2xl flex flex-col h-full p-0">
+      <SheetContent className="w-full sm:max-w-lg flex flex-col h-full p-0">
         <SheetHeader className="px-6 pt-6 pb-4 border-b shrink-0">
           <div className="flex items-center gap-2">
             <div className="flex-1 min-w-0">
@@ -124,43 +137,27 @@ export function JobVariablesPanel({
               <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
             </Button>
           </div>
-          {orphanConnIds.length > 0 && (
-            <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20 px-3 py-2 mt-2">
-              <p className="text-xs text-amber-700 dark:text-amber-300 flex-1">
-                {orphanConnIds.length} orphaned connection value
-                {orphanConnIds.length !== 1 ? 's' : ''} — from connections no longer on this job.
-              </p>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-6 text-xs text-amber-700 dark:text-amber-300 hover:text-destructive"
-                onClick={async () => {
-                  for (const id of orphanConnIds) {
-                    await window.api.jobVariables.deleteConnectionValues(jobId, id)
-                  }
-                  void load()
-                }}
-              >
-                Clean all
-              </Button>
-            </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            One value per variable applies to all {connections.length} connection
+            {connections.length === 1 ? '' : 's'} on this job.
+          </p>
+          {!canEdit && (
+            <p className="mt-2 rounded-lg border border-dashed px-3 py-2 text-xs text-muted-foreground">
+              View only — you do not have permission to edit variables for this job.
+            </p>
           )}
         </SheetHeader>
 
         <div className="flex-1 overflow-y-auto">
-          <div className="px-6 py-4 flex flex-col gap-6">
+          <div className="px-6 py-4 flex flex-col gap-4">
             {variables.map((variable) => {
-              const valueByConnId = new Map<number, JobVariableValue>(
-                variable.values.map((v) => [v.connection_id, v])
-              )
-              const allRelevantConnIds = new Set([
-                ...connections.map((c) => c.id),
-                ...variable.values.map((v) => v.connection_id)
-              ])
+              const displayValue = getJobWideDisplayValue(variable, connectionIds)
+              const mixed = connectionsHaveMixedValues(variable, connectionIds)
+              const isEditing = editingVariableId === variable.id
+              const isSaving = savingVariableId === variable.id
 
               return (
-                <div key={variable.id} className="flex flex-col gap-2">
+                <div key={variable.id} className="rounded-lg border p-3 flex flex-col gap-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-sm font-semibold text-primary">
                       {`{{${variable.name}}}`}
@@ -173,174 +170,73 @@ export function JobVariablesPanel({
                         auto: {variable.update_fn}({variable.source_column})
                       </Badge>
                     )}
-                    <span className="text-xs text-muted-foreground ml-auto shrink-0">
-                      default:{' '}
-                      <span className="font-mono">{variable.default_value ?? '(none)'}</span>
-                    </span>
                   </div>
 
-                  <div className="rounded-lg border overflow-hidden">
-                    <table className="w-full text-xs table-fixed">
-                      <colgroup>
-                        <col className="w-[35%]" />
-                        <col className="w-[30%]" />
-                        <col className="w-[25%]" />
-                        <col className="w-[10%]" />
-                      </colgroup>
-                      <thead className="bg-muted/40">
-                        <tr>
-                          <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                            Connection
-                          </th>
-                          <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                            Current Value
-                          </th>
-                          <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                            Last Updated
-                          </th>
-                          <th className="px-3 py-2" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Array.from(allRelevantConnIds).map((connId) => {
-                          const conn = connById.get(connId)
-                          const val = valueByConnId.get(connId)
-                          const isOrphan = !jobConnIds.has(connId)
-                          const isEditing =
-                            editState?.jobVariableId === variable.id &&
-                            editState?.connectionId === connId
+                  {mixed && !isEditing && (
+                    <p className="text-xs text-amber-700 dark:text-amber-300">
+                      Connections currently have different values. Saving will set the same value
+                      for all connections.
+                    </p>
+                  )}
 
-                          return (
-                            <tr
-                              key={connId}
-                              className={cn(
-                                'border-t',
-                                isOrphan && 'bg-amber-50/50 dark:bg-amber-950/10'
-                              )}
-                            >
-                              <td className="px-3 py-2 truncate max-w-0">
-                                <span
-                                  className={cn(
-                                    'block truncate',
-                                    isOrphan && 'text-amber-600 dark:text-amber-400'
-                                  )}
-                                  title={conn?.name ?? `Connection #${connId}`}
-                                >
-                                  {conn?.name ?? `Connection #${connId}`}
-                                </span>
-                                {isOrphan && (
-                                  <Badge
-                                    variant="outline"
-                                    className="text-[9px] h-3.5 text-amber-600 border-amber-400 mt-0.5"
-                                  >
-                                    orphan
-                                  </Badge>
-                                )}
-                              </td>
-                              <td className="px-3 py-2 max-w-0">
-                                {isEditing ? (
-                                  <Input
-                                    value={editState.value}
-                                    onChange={(e) =>
-                                      setEditState((prev) =>
-                                        prev ? { ...prev, value: e.target.value } : null
-                                      )
-                                    }
-                                    className="h-6 text-xs font-mono w-full"
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') void saveEdit()
-                                      if (e.key === 'Escape') setEditState(null)
-                                    }}
-                                    autoFocus
-                                  />
-                                ) : (
-                                  <span
-                                    className="font-mono block truncate"
-                                    title={val?.value ?? ''}
-                                  >
-                                    {val?.value ?? (
-                                      <span className="text-muted-foreground italic">
-                                        {variable.default_value ?? '(not set)'}
-                                      </span>
-                                    )}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="px-3 py-2 text-muted-foreground truncate max-w-0">
-                                <span
-                                  className="block truncate"
-                                  title={
-                                    val?.last_run_at
-                                      ? new Date(val.last_run_at).toLocaleString()
-                                      : ''
-                                  }
-                                >
-                                  {val?.last_run_at
-                                    ? new Date(val.last_run_at).toLocaleString()
-                                    : '—'}
-                                </span>
-                              </td>
-                              <td className="px-3 py-2">
-                                <div className="flex items-center gap-1 justify-end">
-                                  {isEditing ? (
-                                    <>
-                                      <button
-                                        type="button"
-                                        onClick={() => void saveEdit()}
-                                        className="text-primary hover:text-primary/80"
-                                      >
-                                        <Check className="size-3.5" />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setEditState(null)}
-                                        className="text-muted-foreground hover:text-foreground"
-                                      >
-                                        <X className="size-3.5" />
-                                      </button>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          setEditState({
-                                            jobVariableId: variable.id,
-                                            connectionId: connId,
-                                            value: val?.value ?? variable.default_value ?? ''
-                                          })
-                                        }
-                                        className="text-muted-foreground hover:text-foreground"
-                                        title="Override value"
-                                      >
-                                        <Edit2 className="size-3" />
-                                      </button>
-                                      {isOrphan && (
-                                        <button
-                                          type="button"
-                                          onClick={() => void deleteConnValues(connId)}
-                                          className="text-muted-foreground hover:text-destructive"
-                                          title="Remove orphaned values"
-                                        >
-                                          <Trash2 className="size-3" />
-                                        </button>
-                                      )}
-                                    </>
-                                  )}
-                                </div>
-                              </td>
-                            </tr>
-                          )
-                        })}
-                        {allRelevantConnIds.size === 0 && (
-                          <tr>
-                            <td colSpan={4} className="px-3 py-4 text-center text-muted-foreground">
-                              No values yet — will populate after first run.
-                            </td>
-                          </tr>
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-xs font-medium text-muted-foreground">Current value</span>
+                    {canEdit && isEditing ? (
+                      <div className="flex items-center gap-2">
+                        <Input
+                          value={draftValue}
+                          onChange={(event) => setDraftValue(event.target.value)}
+                          className="h-8 text-sm font-mono"
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') void saveJobWideValue(variable.id)
+                            if (event.key === 'Escape') {
+                              setEditingVariableId(null)
+                              setDraftValue('')
+                            }
+                          }}
+                          autoFocus
+                        />
+                        <Button
+                          type="button"
+                          size="icon-sm"
+                          onClick={() => void saveJobWideValue(variable.id)}
+                          disabled={isSaving}
+                        >
+                          <Check className="size-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          size="icon-sm"
+                          variant="outline"
+                          onClick={() => {
+                            setEditingVariableId(null)
+                            setDraftValue('')
+                          }}
+                          disabled={isSaving}
+                        >
+                          <X className="size-3.5" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm flex-1 truncate" title={displayValue}>
+                          {displayValue || (
+                            <span className="text-muted-foreground italic">(not set)</span>
+                          )}
+                        </span>
+                        {canEdit && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs shrink-0"
+                            onClick={() => startEdit(variable)}
+                          >
+                            Edit
+                          </Button>
                         )}
-                      </tbody>
-                    </table>
+                      </div>
+                    )}
                   </div>
                 </div>
               )

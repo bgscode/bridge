@@ -8,6 +8,7 @@
  */
 import { getAuthToken, isAdmin } from '../auth-context'
 import db from '../../db/index'
+import { jobVariableRepository } from '../../db/repositories/job-variable.repository'
 import type { ConnectionRow, JobRow, JobVariable } from '@shared/index'
 
 const API_BASE = process.env.BRIDGE_API_URL
@@ -299,7 +300,11 @@ function buildJobVariableBody(row: JobVariable): Record<string, unknown> | null 
 
 export async function mirrorJobVariableCreate(row: JobVariable): Promise<void> {
   const body = buildJobVariableBody(row)
-  if (!body) return
+  if (!body) {
+    throw new Error(
+      'This job is not synced to the server yet. Sync the app first, then save variables.'
+    )
+  }
   const created = await call<{ id: string }>('POST', '/job-variables', body, { adminOnly: false })
   if (created?.id) saveRemoteId('job_variables', row.id, created.id)
 }
@@ -339,6 +344,20 @@ export async function mirrorJobVariableSetValue(
     },
     { adminOnly: false }
   )
+}
+
+export async function mirrorJobVariableSetJobWideValue(
+  jobVariableId: number,
+  connectionIds: number[],
+  value: string
+): Promise<void> {
+  const variable = jobVariableRepository.findById(jobVariableId)
+  if (variable) await mirrorJobVariableUpdate(variable)
+
+  const uniqueConnectionIds = Array.from(new Set(connectionIds))
+  for (const connectionId of uniqueConnectionIds) {
+    await mirrorJobVariableSetValue(jobVariableId, connectionId, value)
+  }
 }
 
 export async function mirrorJobVariableDeleteConnectionValues(

@@ -31,7 +31,7 @@ export function useSyncRefresh(): void {
       const p = result.pulled
       if (p) {
         toast.message('Data refreshed', {
-          description: `${p.connections} connections · ${p.jobs} jobs · ${p.stores} stores`
+          description: `${p.connections} connections · ${p.jobs} jobs · ${p.jobVariables ?? 0} variables · ${p.stores} stores`
         })
       }
     })

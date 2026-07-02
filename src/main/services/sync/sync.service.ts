@@ -146,6 +146,88 @@ function normalizeUniqueStringIds(values: unknown): string[] {
 
 // ── PUSH ────────────────────────────────────────────────────────────────────
 
+type PushResponse = {
+  stores: Record<number, string>
+  fiscalYears: Record<number, string>
+  groups: Record<number, string>
+  jobGroups: Record<number, string>
+  connections: Record<number, string>
+  jobs: Record<number, string>
+  jobVariables?: Record<number, string>
+}
+
+function applyRemoteIdMap(table: string, map: Record<number, string> | undefined): void {
+  if (!map) return
+  const stmt = db.prepare(`UPDATE ${table} SET remote_id = ? WHERE id = ?`)
+  const tx = db.transaction((entries: [number, string][]) => {
+    for (const [id, rid] of entries) stmt.run(rid, id)
+  })
+  tx(Object.entries(map).map(([k, v]) => [Number(k), v] as [number, string]))
+}
+
+function buildJobVariablesPushItems(
+  local: ReturnType<typeof collectLocal>,
+  jobRemote: Record<number, string>,
+  connRemote: Record<number, string>
+) {
+  return local.jobVariables.map((v) => ({
+    localId: v.id as number,
+    remoteId: (v.remote_id as string | null) ?? undefined,
+    jobLocalId: (v.job_id as number | null) ?? null,
+    jobRemoteId: v.job_id ? jobRemote[v.job_id as number] : undefined,
+    name: String(v.name),
+    description: (v.description as string | null) ?? null,
+    defaultValue: (v.default_value as string | null) ?? null,
+    autoUpdate: Boolean(v.auto_update),
+    sourceColumn: (v.source_column as string | null) ?? null,
+    updateFn: (v.update_fn as 'max' | 'min' | 'last') ?? 'max',
+    values: local.jobVariableValues
+      .filter((val) => val.job_variable_id === v.id)
+      .map((val) => ({
+        connectionLocalId: val.connection_id as number,
+        connectionRemoteId: connRemote[val.connection_id as number] ?? undefined,
+        value: (val.value as string | null) ?? null,
+        lastRunAt: (val.last_run_at as string | null) ?? null
+      }))
+  }))
+}
+
+/** Push only job variables + checkpoint values — safe for every sync. */
+async function pushJobVariablesOnly(token: string): Promise<number> {
+  const local = collectLocal()
+  if (local.jobVariables.length === 0) return 0
+
+  const connRemote = Object.fromEntries(
+    (local.connections as { id: number; remote_id: string | null }[])
+      .filter((r) => r.remote_id)
+      .map((r) => [r.id, r.remote_id as string])
+  )
+  const jobRemote = Object.fromEntries(
+    (local.jobs as { id: number; remote_id: string | null }[])
+      .filter((r) => r.remote_id)
+      .map((r) => [r.id, r.remote_id as string])
+  )
+
+  const jobVariables = buildJobVariablesPushItems(local, jobRemote, connRemote).filter(
+    (item) => !!item.jobRemoteId
+  )
+  if (jobVariables.length === 0) return 0
+
+  const maps = await post<PushResponse>('/sync/push', token, {
+    stores: [],
+    fiscalYears: [],
+    groups: [],
+    jobGroups: [],
+    settings: [],
+    connections: [],
+    jobs: [],
+    jobVariables
+  })
+
+  applyRemoteIdMap('job_variables', maps.jobVariables)
+  return Object.keys(maps.jobVariables ?? {}).length
+}
+
 async function pushAll(token: string) {
   const local = collectLocal()
 
@@ -307,56 +389,18 @@ async function pushAll(token: string) {
         last_connection_errors: lastConnectionErrors
       }
     }),
-    jobVariables: local.jobVariables.map((v) => ({
-      localId: v.id as number,
-      remoteId: (v.remote_id as string | null) ?? undefined,
-      jobLocalId: (v.job_id as number | null) ?? null,
-      jobRemoteId: v.job_id ? jobRemote[v.job_id as number] : undefined,
-      name: String(v.name),
-      description: (v.description as string | null) ?? null,
-      defaultValue: (v.default_value as string | null) ?? null,
-      autoUpdate: Boolean(v.auto_update),
-      sourceColumn: (v.source_column as string | null) ?? null,
-      updateFn: (v.update_fn as 'max' | 'min' | 'last') ?? 'max',
-      values: local.jobVariableValues
-        .filter((val) => val.job_variable_id === v.id)
-        .map((val) => ({
-          connectionLocalId: val.connection_id as number,
-          connectionRemoteId: connRemote[val.connection_id as number] ?? undefined,
-          value: (val.value as string | null) ?? null,
-          lastRunAt: (val.last_run_at as string | null) ?? null
-        }))
-    }))
-  }
-
-  type PushResponse = {
-    stores: Record<number, string>
-    fiscalYears: Record<number, string>
-    groups: Record<number, string>
-    jobGroups: Record<number, string>
-    connections: Record<number, string>
-    jobs: Record<number, string>
-    jobVariables?: Record<number, string>
+    jobVariables: buildJobVariablesPushItems(local, jobRemote, connRemote)
   }
 
   const maps = await post<PushResponse>('/sync/push', token, payload)
 
-  // Persist returned remote_ids
-  const applyMap = (table: string, map: Record<number, string> | undefined) => {
-    if (!map) return
-    const stmt = db.prepare(`UPDATE ${table} SET remote_id = ? WHERE id = ?`)
-    const tx = db.transaction((entries: [number, string][]) => {
-      for (const [id, rid] of entries) stmt.run(rid, id)
-    })
-    tx(Object.entries(map).map(([k, v]) => [Number(k), v] as [number, string]))
-  }
-  applyMap('stores', maps.stores)
-  applyMap('fiscal_years', maps.fiscalYears)
-  applyMap('groups', maps.groups)
-  applyMap('job_groups', maps.jobGroups)
-  applyMap('connections', maps.connections)
-  applyMap('jobs', maps.jobs)
-  applyMap('job_variables', maps.jobVariables)
+  applyRemoteIdMap('stores', maps.stores)
+  applyRemoteIdMap('fiscal_years', maps.fiscalYears)
+  applyRemoteIdMap('groups', maps.groups)
+  applyRemoteIdMap('job_groups', maps.jobGroups)
+  applyRemoteIdMap('connections', maps.connections)
+  applyRemoteIdMap('jobs', maps.jobs)
+  applyRemoteIdMap('job_variables', maps.jobVariables)
 
   return {
     stores: Object.keys(maps.stores).length,
@@ -760,8 +804,8 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
 export async function syncAll(token: string): Promise<SyncResult> {
   if (!token) throw new Error('Authentication token required for sync')
   if (!API_BASE) throw new Error('BRIDGE_API_URL is not configured')
-  // PULL-ONLY: server is master. Admin writes flow directly to server via REST.
-  // For the initial seeding of pre-existing local data, call `pushOnce(token)`.
+  // Push job variables first so manual values survive the pull refresh.
+  const jobVariablesPushed = await pushJobVariablesOnly(token)
   const pulled = await pullAll(token)
   const pushed = {
     stores: 0,
@@ -770,7 +814,7 @@ export async function syncAll(token: string): Promise<SyncResult> {
     jobGroups: 0,
     connections: 0,
     jobs: 0,
-    jobVariables: 0,
+    jobVariables: jobVariablesPushed,
     settings: 0
   }
   return { pushed, pulled }

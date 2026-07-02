@@ -54,7 +54,7 @@ export function SiteHeader(): JSX.Element {
       await Promise.all([connectionsApi.list().catch(() => []), jobsApi.list().catch(() => [])])
       const p = result.pulled
       toast.success(
-        `Synced: ${p.connections} connections · ${p.jobs} jobs · ${p.stores} stores · ${p.groups} groups`
+        `Synced: ${p.connections} connections · ${p.jobs} jobs · ${p.jobVariables ?? 0} variables · ${p.stores} stores`
       )
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Sync failed')

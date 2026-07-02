@@ -178,17 +178,26 @@ export const usersApi = {
 
 // ── Assignments (admin) ─────────────────────────────────────────────────────
 
+export interface JobAssignmentEntry {
+  jobId: string
+  canEditVariables: boolean
+}
+
 export interface UserAssignments {
   connectionIds: string[]
   jobIds: string[]
+  jobs: JobAssignmentEntry[]
 }
 
 export const assignmentsApi = {
   get: (userId: string) => api.get<UserAssignments>(`/assignments/users/${userId}`),
   setConnections: (userId: string, ids: string[]) =>
     api.put<{ connectionIds: string[] }>(`/assignments/users/${userId}/connections`, { ids }),
-  setJobs: (userId: string, ids: string[]) =>
-    api.put<{ jobIds: string[] }>(`/assignments/users/${userId}/jobs`, { ids })
+  setJobs: (userId: string, jobs: JobAssignmentEntry[]) =>
+    api.put<{ jobIds: string[]; jobs: JobAssignmentEntry[] }>(
+      `/assignments/users/${userId}/jobs`,
+      { jobs }
+    )
 }
 
 // ── Connections ─────────────────────────────────────────────────────────────

@@ -139,7 +139,7 @@ export default function JobsPage(): JSX.Element {
   const { jobs, create, update, remove, removeMany, run } = useJobs()
   const { jobGroups } = useJobGroups()
   const { connections } = useConnections()
-  const { user: me } = useAuth()
+  const { user: me, canEditJobVariables } = useAuth()
   const navigate = useNavigate()
   const isAdmin = me?.role === 'admin'
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({})
@@ -520,14 +520,17 @@ export default function JobsPage(): JSX.Element {
         </CardContent>
       </Card>
 
-      {/* Create / Edit Form */}
-      <JobForm
-        isOpen={formOpen}
-        onOpenChange={setFormOpen}
-        mode={formMode}
-        data={selectedJob ? { ...selectedJob, schedule_raw: selectedJob.schedule } : undefined}
-        onSubmit={handleFormSubmit}
-      />
+      {/* Create / Edit Form — mount only while open so the dialog renders cleanly */}
+      {formOpen && (
+        <JobForm
+          key={formMode === 'edit' && selected ? `job-${selected.id}` : 'create'}
+          isOpen
+          onOpenChange={setFormOpen}
+          mode={formMode}
+          data={selectedJob ? { ...selectedJob, schedule_raw: selectedJob.schedule } : undefined}
+          onSubmit={handleFormSubmit}
+        />
+      )}
 
       {/* Single Delete */}
       <DeleteConfirmDialog
@@ -573,6 +576,8 @@ export default function JobsPage(): JSX.Element {
           }}
           jobId={varPanelJob.id}
           jobName={varPanelJob.name}
+          jobRemoteId={varPanelJob.remote_id}
+          canEdit={canEditJobVariables(varPanelJob.remote_id)}
           connections={connections.filter((c) => varPanelJob.connection_ids.includes(c.id))}
         />
       )}

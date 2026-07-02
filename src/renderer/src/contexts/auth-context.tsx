@@ -1,5 +1,6 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
-import { authApi, clearToken, getToken, setToken, type AuthUser } from '@/lib/api'
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { authApi, assignmentsApi, clearToken, getToken, setToken, type AuthUser } from '@/lib/api'
+import { canEditJobVariables as checkCanEditJobVariables } from '@/lib/job-permissions'
 
 interface RegisterInput {
   userId: string
@@ -13,6 +14,8 @@ interface AuthContextValue {
   user: AuthUser | null
   isLoading: boolean
   isAuthenticated: boolean
+  variableEditJobIds: ReadonlySet<string>
+  canEditJobVariables: (jobRemoteId: string | null | undefined) => boolean
   login: (identifier: string, password: string) => Promise<void>
   register: (input: RegisterInput) => Promise<void>
   logout: () => Promise<void>
@@ -21,26 +24,49 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null)
 
+async function loadVariableEditJobIds(user: AuthUser): Promise<string[]> {
+  if (user.role === 'admin') return []
+  try {
+    const assignments = await assignmentsApi.get(user.id)
+    return assignments.jobs.filter((job) => job.canEditVariables).map((job) => job.jobId)
+  } catch {
+    return []
+  }
+}
+
+async function syncMainAuthContext(
+  token: string | null,
+  role: string | null,
+  variableEditJobIds: string[]
+): Promise<void> {
+  await window.api.auth.setContext(token, role, variableEditJobIds)
+}
+
 export function AuthProvider({ children }: { children: ReactNode }): React.JSX.Element {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const [variableEditJobIds, setVariableEditJobIds] = useState<ReadonlySet<string>>(new Set())
 
   const refresh = async (): Promise<void> => {
     const token = getToken()
     if (!token) {
       setUser(null)
-      await window.api.auth.setContext(null, null)
+      setVariableEditJobIds(new Set())
+      await syncMainAuthContext(null, null, [])
       setIsLoading(false)
       return
     }
     try {
       const me = await authApi.me()
+      const editJobIds = await loadVariableEditJobIds(me)
       setUser(me)
-      await window.api.auth.setContext(token, me.role)
+      setVariableEditJobIds(new Set(editJobIds))
+      await syncMainAuthContext(token, me.role, editJobIds)
     } catch {
       clearToken()
       setUser(null)
-      await window.api.auth.setContext(null, null)
+      setVariableEditJobIds(new Set())
+      await syncMainAuthContext(null, null, [])
     } finally {
       setIsLoading(false)
     }
@@ -56,8 +82,10 @@ export function AuthProvider({ children }: { children: ReactNode }): React.JSX.E
   const login = async (identifier: string, password: string): Promise<void> => {
     const { token, user: u } = await authApi.login(identifier, password)
     setToken(token)
+    const editJobIds = await loadVariableEditJobIds(u)
     setUser(u)
-    await window.api.auth.setContext(token, u.role)
+    setVariableEditJobIds(new Set(editJobIds))
+    await syncMainAuthContext(token, u.role, editJobIds)
     // Pull-only sync from server on login. Server = master.
     try {
       await window.api.sync.run(token)
@@ -90,12 +118,29 @@ export function AuthProvider({ children }: { children: ReactNode }): React.JSX.E
     }
     clearToken()
     setUser(null)
-    await window.api.auth.setContext(null, null)
+    setVariableEditJobIds(new Set())
+    await syncMainAuthContext(null, null, [])
   }
+
+  const canEditJobVariables = useMemo(
+    () => (jobRemoteId: string | null | undefined) =>
+      checkCanEditJobVariables(jobRemoteId, user?.role === 'admin', variableEditJobIds),
+    [user?.role, variableEditJobIds]
+  )
 
   return (
     <AuthContext.Provider
-      value={{ user, isLoading, isAuthenticated: !!user, login, register, logout, refresh }}
+      value={{
+        user,
+        isLoading,
+        isAuthenticated: !!user,
+        variableEditJobIds,
+        canEditJobVariables,
+        login,
+        register,
+        logout,
+        refresh
+      }}
     >
       {children}
     </AuthContext.Provider>

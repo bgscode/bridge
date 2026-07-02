@@ -49,6 +49,7 @@ export function AssignmentsDialog({ user, open, onOpenChange }: Props): JSX.Elem
   const [saving, setSaving] = useState(false)
   const [connIds, setConnIds] = useState<Set<string>>(new Set())
   const [jobIds, setJobIds] = useState<Set<string>>(new Set())
+  const [variableEditJobIds, setVariableEditJobIds] = useState<Set<string>>(new Set())
   const [connSearch, setConnSearch] = useState('')
   const [jobSearch, setJobSearch] = useState('')
   const [connGroupFilter, setConnGroupFilter] = useState('all')
@@ -66,6 +67,9 @@ export function AssignmentsDialog({ user, open, onOpenChange }: Props): JSX.Elem
         if (cancelled) return
         setConnIds(new Set(d.connectionIds))
         setJobIds(new Set(d.jobIds))
+        setVariableEditJobIds(
+          new Set(d.jobs.filter((job) => job.canEditVariables).map((job) => job.jobId))
+        )
       })
       .catch((e) => toast.error((e as Error).message))
       .finally(() => !cancelled && setLoading(false))
@@ -90,7 +94,13 @@ export function AssignmentsDialog({ user, open, onOpenChange }: Props): JSX.Elem
     try {
       await Promise.all([
         assignmentsApi.setConnections(user.id, Array.from(connIds)),
-        assignmentsApi.setJobs(user.id, Array.from(jobIds))
+        assignmentsApi.setJobs(
+          user.id,
+          Array.from(jobIds).map((jobId) => ({
+            jobId,
+            canEditVariables: variableEditJobIds.has(jobId)
+          }))
+        )
       ])
       toast.success(`Assignments updated for ${user.name}`)
       onOpenChange(false)
@@ -141,13 +151,35 @@ export function AssignmentsDialog({ user, open, onOpenChange }: Props): JSX.Elem
     setter(next)
   }
 
+  const toggleJobAssignment = (jobId: string): void => {
+    const nextJobIds = new Set(jobIds)
+    const nextVariableEditJobIds = new Set(variableEditJobIds)
+    if (nextJobIds.has(jobId)) {
+      nextJobIds.delete(jobId)
+      nextVariableEditJobIds.delete(jobId)
+    } else {
+      nextJobIds.add(jobId)
+    }
+    setJobIds(nextJobIds)
+    setVariableEditJobIds(nextVariableEditJobIds)
+  }
+
+  const toggleVariableEdit = (jobId: string): void => {
+    if (!jobIds.has(jobId)) return
+    const next = new Set(variableEditJobIds)
+    if (next.has(jobId)) next.delete(jobId)
+    else next.add(jobId)
+    setVariableEditJobIds(next)
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] w-full sm:max-w-4xl flex flex-col gap-0 p-0">
         <DialogHeader className="px-6 py-4">
           <DialogTitle>Assign to {user?.name ?? ''}</DialogTitle>
           <DialogDescription>
-            Pick which connections and jobs this user can access.
+            Pick which connections and jobs this user can access. For each assigned job, you can
+            also allow editing variable values.
           </DialogDescription>
         </DialogHeader>
         <Separator />
@@ -286,12 +318,17 @@ export function AssignmentsDialog({ user, open, onOpenChange }: Props): JSX.Elem
                     onClick={() => {
                       const visibleIds = filteredJobs.map((j) => j.remote_id as string)
                       const next = new Set(jobIds)
+                      const nextVariableEdit = new Set(variableEditJobIds)
                       if (selectedVisibleJobs === filteredJobs.length && filteredJobs.length > 0) {
-                        visibleIds.forEach((id) => next.delete(id))
+                        visibleIds.forEach((id) => {
+                          next.delete(id)
+                          nextVariableEdit.delete(id)
+                        })
                       } else {
                         visibleIds.forEach((id) => next.add(id))
                       }
                       setJobIds(next)
+                      setVariableEditJobIds(nextVariableEdit)
                     }}
                   >
                     {selectedVisibleJobs === filteredJobs.length && filteredJobs.length > 0
@@ -304,6 +341,7 @@ export function AssignmentsDialog({ user, open, onOpenChange }: Props): JSX.Elem
                     onClick={() => {
                       if (jobIds.size === js.length && js.length > 0) {
                         setJobIds(new Set())
+                        setVariableEditJobIds(new Set())
                       } else {
                         setJobIds(new Set(js.map((j) => j.remote_id as string)))
                       }
@@ -341,15 +379,25 @@ export function AssignmentsDialog({ user, open, onOpenChange }: Props): JSX.Elem
                     {filteredJobs.map((j) => {
                       const rid = j.remote_id as string
                       const checked = jobIds.has(rid)
+                      const canEditVariables = variableEditJobIds.has(rid)
                       return (
-                        <li key={rid}>
-                          <label className="flex items-center gap-2 py-1 cursor-pointer">
+                        <li key={rid} className="rounded-md border border-transparent px-1 py-0.5">
+                          <div className="flex items-center gap-2 py-1">
                             <Checkbox
                               checked={checked}
-                              onCheckedChange={() => toggle(jobIds, setJobIds, rid)}
+                              onCheckedChange={() => toggleJobAssignment(rid)}
                             />
-                            <span className="text-sm truncate">{j.name}</span>
-                          </label>
+                            <span className="text-sm truncate flex-1">{j.name}</span>
+                          </div>
+                          {checked && (
+                            <label className="ml-7 flex items-center gap-2 py-1 text-xs text-muted-foreground cursor-pointer">
+                              <Checkbox
+                                checked={canEditVariables}
+                                onCheckedChange={() => toggleVariableEdit(rid)}
+                              />
+                              <span>Edit variables</span>
+                            </label>
+                          )}
                         </li>
                       )
                     })}

@@ -115,8 +115,8 @@ const api = {
     }
   },
   auth: {
-    setContext: (token: string | null, role: string | null) =>
-      ipcRenderer.invoke('auth:set-context', token, role)
+    setContext: (token: string | null, role: string | null, variableEditJobIds?: string[]) =>
+      ipcRenderer.invoke('auth:set-context', token, role, variableEditJobIds ?? [])
   },
   jobVariables: {
     getAll: (jobId: number) => ipcRenderer.invoke('job-variables:getAll', jobId),
@@ -125,6 +125,8 @@ const api = {
     delete: (id: number) => ipcRenderer.invoke('job-variables:delete', id),
     setValue: (jobVariableId: number, connectionId: number, value: string) =>
       ipcRenderer.invoke('job-variables:setValue', jobVariableId, connectionId, value),
+    setJobValue: (jobVariableId: number, connectionIds: number[], value: string) =>
+      ipcRenderer.invoke('job-variables:setJobValue', jobVariableId, connectionIds, value),
     deleteConnectionValues: (jobId: number, connectionId: number) =>
       ipcRenderer.invoke('job-variables:deleteConnectionValues', jobId, connectionId)
   }

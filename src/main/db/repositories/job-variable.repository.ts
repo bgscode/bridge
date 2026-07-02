@@ -254,6 +254,21 @@ export const jobVariableRepository = {
     this.upsertValue(jobVariableId, connectionId, value)
   },
 
+  /**
+   * Set one value for the entire job — updates default_value and every connection
+   * on the job so manual edits are not done one connection at a time.
+   */
+  setJobWideValue(jobVariableId: number, connectionIds: number[], value: string): void {
+    db.prepare(
+      `UPDATE job_variables SET default_value = ?, updated_at = datetime('now') WHERE id = ?`
+    ).run(value, jobVariableId)
+
+    const uniqueConnectionIds = Array.from(new Set(connectionIds))
+    for (const connectionId of uniqueConnectionIds) {
+      this.upsertValue(jobVariableId, connectionId, value)
+    }
+  },
+
   /** Remove all stored values for a specific connection across a job's variables. */
   deleteConnectionValues(jobId: number, connectionId: number): void {
     db.prepare(
