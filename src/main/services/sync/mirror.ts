@@ -150,6 +150,7 @@ function buildJobBody(row: JobRow, mode: 'create' | 'update' = 'update'): Record
     status: row.status ?? 'idle',
     modify_dates: row.modify_dates !== false,
     summary_extra_columns: row.summary_extra_columns ?? null,
+    summary_extra_columns_scope: row.summary_extra_columns_scope ?? 'summary_only',
     excel_combine_sheets: !!row.excel_combine_sheets
   }
   // On create, omit job_group_id when null — sending null causes the server

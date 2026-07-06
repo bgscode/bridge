@@ -1,14 +1,20 @@
-import Database from 'better-sqlite3'
+import type Database from 'better-sqlite3'
 import { app, dialog } from 'electron'
 import { mkdirSync, renameSync, existsSync } from 'fs'
 import { join } from 'path'
 import { runMigrations } from './migrate'
 
-const userDataPath = app.getPath('userData')
-const dbDir = join(userDataPath, 'bridge-db')
-mkdirSync(dbDir, { recursive: true }) //
+let dbInstance: Database.Database | null = null
+let dbInitError: Error | null = null
 
-const dbPath = join(dbDir, 'bridge.db')
+type BetterSqlite3Constructor = new (path: string) => Database.Database
+
+function loadBetterSqlite3(): BetterSqlite3Constructor {
+  // Defer native module load until after Electron is ready so packaged
+  // Windows builds load the rebuilt .node binary from app.asar.unpacked.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  return require('better-sqlite3') as BetterSqlite3Constructor
+}
 
 /**
  * Open the SQLite database, surviving common failure modes:
@@ -16,12 +22,16 @@ const dbPath = join(dbDir, 'bridge.db')
  *   - File-corrupted → quarantine the file (.corrupt-<ts>) so the next launch
  *     starts fresh; user can recover the old file from disk if needed.
  *   - Migration failure on a newly-opened DB → quarantine + retry once.
- * If even the retry fails we re-throw so the global uncaughtException handler
- * logs it and the user sees the error boundary instead of a silent black box.
  */
 function openDatabase(): Database.Database {
+  const userDataPath = app.getPath('userData')
+  const dbDir = join(userDataPath, 'bridge-db')
+  mkdirSync(dbDir, { recursive: true })
+  const dbPath = join(dbDir, 'bridge.db')
+
   try {
-    const handle = new Database(dbPath)
+    const BetterSqlite3 = loadBetterSqlite3()
+    const handle = new BetterSqlite3(dbPath)
     handle.pragma('journal_mode = WAL')
     handle.pragma('foreign_keys = ON')
     runMigrations(handle)
@@ -30,12 +40,11 @@ function openDatabase(): Database.Database {
     const msg = err instanceof Error ? err.message : String(err)
     console.error('[db] open failed:', msg)
 
-    // SQLITE_BUSY / SQLITE_LOCKED: another process owns the file.
     if (/SQLITE_BUSY|SQLITE_LOCKED|database is locked/i.test(msg)) {
       try {
         dialog.showErrorBox(
           'Database is locked',
-          'Another copy of Bridge appears to be running and is using the database. Close it and try again.'
+          'Another copy of Alam appears to be running and is using the database. Close it and try again.'
         )
       } catch {
         // dialog may not be available before app.whenReady; just log.
@@ -43,13 +52,13 @@ function openDatabase(): Database.Database {
       throw err
     }
 
-    // Corruption: move the bad file aside so the next attempt starts clean.
     if (/SQLITE_CORRUPT|malformed|not a database/i.test(msg) && existsSync(dbPath)) {
       const quarantine = `${dbPath}.corrupt-${Date.now()}`
       try {
         renameSync(dbPath, quarantine)
         console.warn(`[db] corrupt file quarantined to ${quarantine}; rebuilding fresh database`)
-        const handle = new Database(dbPath)
+        const BetterSqlite3 = loadBetterSqlite3()
+        const handle = new BetterSqlite3(dbPath)
         handle.pragma('journal_mode = WAL')
         handle.pragma('foreign_keys = ON')
         runMigrations(handle)
@@ -64,6 +73,25 @@ function openDatabase(): Database.Database {
   }
 }
 
-const db: Database.Database = openDatabase()
+function getDatabase(): Database.Database {
+  if (dbInstance) return dbInstance
+  if (dbInitError) throw dbInitError
+
+  try {
+    dbInstance = openDatabase()
+    return dbInstance
+  } catch (err) {
+    dbInitError = err instanceof Error ? err : new Error(String(err))
+    throw dbInitError
+  }
+}
+
+const db = new Proxy({} as Database.Database, {
+  get(_target, prop, receiver) {
+    const instance = getDatabase()
+    const value = Reflect.get(instance as object, prop, receiver)
+    return typeof value === 'function' ? value.bind(instance) : value
+  }
+})
 
 export default db

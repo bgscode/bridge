@@ -15,6 +15,7 @@ interface RawJobRow extends Omit<
   | 'online_only'
   | 'modify_dates'
   | 'summary_extra_columns'
+  | 'summary_extra_columns_scope'
   | 'excel_combine_sheets'
   | 'last_failed_connection_ids'
   | 'last_connection_errors'
@@ -28,6 +29,7 @@ interface RawJobRow extends Omit<
   last_failed_connection_ids: string | null
   last_connection_errors: string | null
   summary_extra_columns: string | null
+  summary_extra_columns_scope: string
   excel_combine_sheets: number
 }
 
@@ -65,6 +67,10 @@ function parseRow(raw: RawJobRow): JobRow {
     ),
     last_connection_errors: JSON.parse(raw.last_connection_errors || '[]'),
     summary_extra_columns: raw.summary_extra_columns ? JSON.parse(raw.summary_extra_columns) : null,
+    summary_extra_columns_scope:
+      raw.summary_extra_columns_scope === 'summary_and_combined'
+        ? 'summary_and_combined'
+        : 'summary_only',
     excel_combine_sheets: Boolean(raw.excel_combine_sheets)
   }
 }
@@ -93,6 +99,10 @@ function serializeForInsert(data: CreateJobDto): Record<string, unknown> {
       Array.isArray(data.summary_extra_columns) && data.summary_extra_columns.length > 0
         ? JSON.stringify(data.summary_extra_columns)
         : null,
+    summary_extra_columns_scope:
+      data.summary_extra_columns_scope === 'summary_and_combined'
+        ? 'summary_and_combined'
+        : 'summary_only',
     excel_combine_sheets: data.excel_combine_sheets ? 1 : 0
   }
 }
@@ -123,6 +133,7 @@ const KNOWN_COLUMNS = new Set([
   'last_failed_connection_ids',
   'last_connection_errors',
   'summary_extra_columns',
+  'summary_extra_columns_scope',
   'excel_combine_sheets'
 ])
 
@@ -171,7 +182,7 @@ export const jobRepository = {
     const serialized = serializeForInsert(data)
     const result = db
       .prepare(
-        'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, excel_combine_sheets) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @excel_combine_sheets)'
+        'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets)'
       )
       .run(serialized)
     return this.findById(result.lastInsertRowid as number)!
@@ -179,7 +190,7 @@ export const jobRepository = {
 
   bulkCreate(data: CreateJobDto[]): JobRow[] {
     const stmt = db.prepare(
-      'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, excel_combine_sheets) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @excel_combine_sheets)'
+      'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets)'
     )
     const insertMany = db.transaction((jobs: CreateJobDto[]) => {
       const rows: JobRow[] = []

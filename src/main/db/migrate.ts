@@ -432,6 +432,19 @@ const migrations: Migration[] = [
         db.exec('ALTER TABLE jobs ADD COLUMN job_color TEXT DEFAULT NULL')
       }
     }
+  },
+  {
+    version: 26,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('summary_extra_columns_scope')) {
+        db.exec(
+          "ALTER TABLE jobs ADD COLUMN summary_extra_columns_scope TEXT NOT NULL DEFAULT 'summary_only'"
+        )
+      }
+    }
   }
 ]
 

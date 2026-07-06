@@ -199,9 +199,14 @@ export interface JobRow {
   /**
    * Extra columns to append to the Summary sheet after the "Sheet Name" column.
    * Each value is a key like "group_name", "store_name", "fiscal_year_name",
-   * "static_ip", "vpn_ip", "db_name". Stored as JSON array.
+   * "static_ip", "vpn_ip", "db_name", "row_count", "run_timestamp". Stored as JSON array.
    */
   summary_extra_columns: string[] | null
+  /**
+   * Where selected extra columns are written: summary tab only, or summary and
+   * the combined "Data" sheet when excel_combine_sheets is enabled.
+   */
+  summary_extra_columns_scope: SummaryExtraColumnsScope
   excel_combine_sheets: boolean
   // schedule — JSON string, see ScheduleConfig
   schedule: string | null
@@ -221,6 +226,19 @@ export interface JobRow {
   created_at: string
   updated_at: string
 }
+
+export type SummaryExtraColumnsScope = 'summary_only' | 'summary_and_combined'
+
+export const SUMMARY_EXTRA_COLUMN_OPTIONS = [
+  { key: 'group_name', label: 'Group Name' },
+  { key: 'store_name', label: 'Store Name' },
+  { key: 'fiscal_year_name', label: 'Fiscal Year' },
+  { key: 'static_ip', label: 'Static IP' },
+  { key: 'vpn_ip', label: 'VPN IP' },
+  { key: 'db_name', label: 'Database Name' },
+  { key: 'row_count', label: 'Row Count' },
+  { key: 'run_timestamp', label: 'Timestamp' }
+] as const
 
 export type CreateJobDto = Omit<
   JobRow,

@@ -206,6 +206,12 @@ export default function JobsPage(): JSX.Element {
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets')
           ? (values.summary_extra_columns ?? null)
           : null,
+      summary_extra_columns_scope:
+        !isAction &&
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
+        !values.is_multi
+          ? (values.summary_extra_columns_scope ?? 'summary_only')
+          : 'summary_only',
       excel_combine_sheets:
         !isAction &&
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
@@ -241,6 +247,7 @@ export default function JobsPage(): JSX.Element {
       modify_dates: job.modify_dates,
       schedule: job.schedule,
       summary_extra_columns: job.summary_extra_columns,
+      summary_extra_columns_scope: job.summary_extra_columns_scope ?? 'summary_only',
       excel_combine_sheets: job.excel_combine_sheets
     })
   }

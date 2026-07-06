@@ -46,6 +46,8 @@ export interface WriteToGoogleSheetsOptions {
   readChunk: (filePath: string) => Promise<Record<string, unknown>[]>
   onProgress?: (info: { bucket: string; rowsWritten: number; totalRowsForBucket: number }) => void
   combineSheets?: boolean
+  combinedExtraColumnLabels?: string[]
+  getCombinedExtraValues?: (connectionId: number) => string[]
   jobProgress?: JobProgress
   summaryRows?: unknown[][] | null
   gsheet_batch_ranges?: number
@@ -206,6 +208,8 @@ export async function writeToGoogleSheets(opts: WriteToGoogleSheetsOptions): Pro
       bucketTargets,
       operation: opts.operation ?? 'replace',
       readChunk: opts.readChunk,
+      combinedExtraColumnLabels: opts.combinedExtraColumnLabels,
+      getCombinedExtraValues: opts.getCombinedExtraValues,
       onProgress: opts.onProgress
     })
 
@@ -430,6 +434,8 @@ async function writeCombinedDataSheet(args: {
   bucketTargets: GoogleSheetBucketTarget[]
   operation: 'append' | 'replace'
   readChunk: (filePath: string) => Promise<Record<string, unknown>[]>
+  combinedExtraColumnLabels?: string[]
+  getCombinedExtraValues?: (connectionId: number) => string[]
   onProgress?: (info: { bucket: string; rowsWritten: number; totalRowsForBucket: number }) => void
 }): Promise<SheetState> {
   const {
@@ -440,9 +446,15 @@ async function writeCombinedDataSheet(args: {
     bucketTargets,
     operation,
     readChunk,
+    combinedExtraColumnLabels,
+    getCombinedExtraValues,
     onProgress
   } = args
-  const plan = await planCombinedSheetWrite(bucketTargets, readChunk)
+  const plan = await planCombinedSheetWrite(
+    bucketTargets,
+    readChunk,
+    combinedExtraColumnLabels
+  )
   const existingLastRow =
     operation === 'append'
       ? await detectLastUsedRow({
@@ -587,8 +599,17 @@ async function writeCombinedDataSheet(args: {
         continue
       }
 
+      const connectionId = bucketTarget.bucket.connectionId
+      const extraValues =
+        typeof connectionId === 'number' && getCombinedExtraValues
+          ? getCombinedExtraValues(connectionId)
+          : []
       const combinedRows = rawRows.map((row) =>
-        sanitizeArrayRow([bucketTarget.tabName, ...sanitizeObjectRow(row, plan.dataHeaders)])
+        sanitizeArrayRow([
+          bucketTarget.tabName,
+          ...extraValues,
+          ...sanitizeObjectRow(row, plan.dataHeaders)
+        ])
       )
 
       await enqueueRows(combinedRows)
@@ -769,7 +790,8 @@ async function planBucketWrite(
 
 async function planCombinedSheetWrite(
   bucketTargets: GoogleSheetBucketTarget[],
-  readChunk: (filePath: string) => Promise<Record<string, unknown>[]>
+  readChunk: (filePath: string) => Promise<Record<string, unknown>[]>,
+  combinedExtraColumnLabels: string[] = []
 ): Promise<BucketPlan & { dataHeaders: string[]; previewTabName: string | null }> {
   const totalDataRows = bucketTargets.reduce(
     (total, target) => total + Math.max(target.bucket.rowCount ?? 0, 0),
@@ -813,7 +835,7 @@ async function planCombinedSheetWrite(
   let messageRow: SheetRow | null = null
 
   if (totalDataRows > 0) {
-    headers = ['Sheet Name', ...dataHeaders]
+    headers = ['Sheet Name', ...combinedExtraColumnLabels, ...dataHeaders]
   } else {
     headers = [MESSAGE_COLUMN_NAME]
     messageRow = [NO_DATA_MESSAGE]

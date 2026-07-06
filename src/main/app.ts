@@ -91,8 +91,8 @@ function createAndWireMainWindow(): BrowserWindow {
 }
 
 export async function bootstrap(): Promise<void> {
-  electronApp.setAppUserModelId('com.bridge')
-
+  electronApp.setAppUserModelId('com.electron.app')
+    
   // Global safety net: never let a stray error or rejection kill the main
   // process. We log it and keep the app responsive — individual operations
   // still surface errors via their own IPC error paths.

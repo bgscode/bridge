@@ -3,7 +3,8 @@ import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 import { JSX, useEffect, useRef, useState } from 'react'
 import { FileText, Plus, Trash2, RefreshCw } from 'lucide-react'
-import type { JobVariable } from '@shared/index'
+import type { JobVariable, SummaryExtraColumnsScope } from '@shared/index'
+import { SUMMARY_EXTRA_COLUMN_OPTIONS } from '@shared/index'
 
 import { cn, getSpreadsheetId } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -57,8 +58,9 @@ const schema = z
     excel_path: z.string().optional().nullable(),
     template_path: z.string().optional().nullable(),
     template_mode: z.enum(['new', 'existing']).nullable().optional(),
-    // Summary sheet extra columns (Excel only)
+    // Summary sheet extra columns (Excel + Google Sheets)
     summary_extra_columns: z.array(z.string()).optional().nullable(),
+    summary_extra_columns_scope: z.enum(['summary_only', 'summary_and_combined']),
     // Combine all connections into one sheet (single-query Excel only)
     excel_combine_sheets: z.boolean(),
     // Action destination config
@@ -117,6 +119,7 @@ const DEFAULT_FORM_VALUES: JobFormValues = {
   template_path: null,
   template_mode: null,
   summary_extra_columns: null,
+  summary_extra_columns_scope: 'summary_only',
   excel_combine_sheets: false,
   action_file_path: '',
   action_file_name: '',
@@ -469,6 +472,87 @@ function ColumnMappingDialog({
   )
 }
 
+function SummaryExtraColumnsField({
+  summaryExtraCols,
+  excelCombineSheets,
+  summaryExtraColumnsScope,
+  destinationLabel,
+  onColumnsChange,
+  onScopeChange
+}: {
+  summaryExtraCols: string[]
+  excelCombineSheets: boolean
+  summaryExtraColumnsScope: SummaryExtraColumnsScope
+  destinationLabel: 'Summary sheet' | 'Summary tab'
+  onColumnsChange: (next: string[] | null) => void
+  onScopeChange: (scope: SummaryExtraColumnsScope) => void
+}): JSX.Element {
+  return (
+    <Field>
+      <FieldLabel>Summary Sheet Extra Columns</FieldLabel>
+      <p className="text-xs text-muted-foreground mb-2">
+        Select which connection metadata to add after the &quot;Sheet Name&quot; column in the{' '}
+        {destinationLabel}.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {SUMMARY_EXTRA_COLUMN_OPTIONS.map(({ key, label }) => {
+          const selected = summaryExtraCols.includes(key)
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => {
+                const next = selected
+                  ? summaryExtraCols.filter((column) => column !== key)
+                  : [...summaryExtraCols, key]
+                onColumnsChange(next.length ? next : null)
+              }}
+              className={cn(
+                'rounded-md border px-2.5 py-1 text-xs transition-all',
+                selected
+                  ? 'border-primary bg-primary/5 ring-1 ring-primary font-medium'
+                  : 'border-border hover:border-muted-foreground/40'
+              )}
+            >
+              {label}
+            </button>
+          )
+        })}
+      </div>
+      {excelCombineSheets && summaryExtraCols.length > 0 && (
+        <div className="mt-3 space-y-2 rounded-lg border border-dashed px-3 py-2">
+          <p className="text-xs font-medium">Apply extra columns to</p>
+          <div className="flex flex-wrap gap-2">
+            {(
+              [
+                { value: 'summary_only', label: 'Summary only' },
+                { value: 'summary_and_combined', label: 'Summary + Data sheet' }
+              ] as const
+            ).map(({ value, label }) => {
+              const selected = summaryExtraColumnsScope === value
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => onScopeChange(value)}
+                  className={cn(
+                    'rounded-md border px-2.5 py-1 text-xs transition-all',
+                    selected
+                      ? 'border-primary bg-primary/5 ring-1 ring-primary font-medium'
+                      : 'border-border hover:border-muted-foreground/40'
+                  )}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </Field>
+  )
+}
+
 export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormProps): JSX.Element {
   const { connections } = useConnections()
   const { groups } = useGroups()
@@ -513,6 +597,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const apiMethod = useWatch({ control, name: 'api_method' })
   const templatePath = useWatch({ control, name: 'template_path' })
   const summaryExtraCols = (useWatch({ control, name: 'summary_extra_columns' }) ?? []) as string[]
+  const summaryExtraColumnsScope =
+    (useWatch({ control, name: 'summary_extra_columns_scope' }) as SummaryExtraColumnsScope) ??
+    'summary_only'
   const excelCombineSheets = useWatch({ control, name: 'excel_combine_sheets' }) ?? false
   const operation = useWatch({ control, name: 'operation' })
   const actionTargetTable = useWatch({ control, name: 'action_target_table' })
@@ -746,6 +833,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         template_path: data?.template_path ?? null,
         template_mode: data?.template_mode ?? null,
         summary_extra_columns: data?.summary_extra_columns ?? null,
+        summary_extra_columns_scope: data?.summary_extra_columns_scope ?? 'summary_only',
         excel_combine_sheets: data?.excel_combine_sheets ?? false,
         action_file_path,
         action_file_name,
@@ -1004,6 +1092,14 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         Array.isArray(values.summary_extra_columns)
           ? values.summary_extra_columns
           : null,
+      summary_extra_columns_scope:
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
+        !values.is_multi &&
+        values.excel_combine_sheets &&
+        Array.isArray(values.summary_extra_columns) &&
+        values.summary_extra_columns.length > 0
+          ? (values.summary_extra_columns_scope ?? 'summary_only')
+          : 'summary_only',
       excel_combine_sheets:
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
         !values.is_multi
@@ -2094,49 +2190,18 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                           </div>
                         )}
 
-                        <Field>
-                          <FieldLabel>Summary Sheet Extra Columns</FieldLabel>
-                          <p className="text-xs text-muted-foreground mb-2">
-                            Select which connection metadata to add after the &quot;Sheet Name&quot;
-                            column in the Google Sheets Summary tab.
-                          </p>
-                          <div className="flex flex-wrap gap-2">
-                            {(
-                              [
-                                { key: 'group_name', label: 'Group Name' },
-                                { key: 'store_name', label: 'Store Name' },
-                                { key: 'fiscal_year_name', label: 'Fiscal Year' },
-                                { key: 'static_ip', label: 'Static IP' },
-                                { key: 'vpn_ip', label: 'VPN IP' },
-                                { key: 'db_name', label: 'Database Name' }
-                              ] as const
-                            ).map(({ key, label }) => {
-                              const selected = summaryExtraCols.includes(key)
-                              return (
-                                <button
-                                  key={key}
-                                  type="button"
-                                  onClick={() => {
-                                    const next = selected
-                                      ? summaryExtraCols.filter((c) => c !== key)
-                                      : [...summaryExtraCols, key]
-                                    setValue('summary_extra_columns', next.length ? next : null, {
-                                      shouldDirty: true
-                                    })
-                                  }}
-                                  className={cn(
-                                    'rounded-md border px-2.5 py-1 text-xs transition-all',
-                                    selected
-                                      ? 'border-primary bg-primary/5 ring-1 ring-primary font-medium'
-                                      : 'border-border hover:border-muted-foreground/40'
-                                  )}
-                                >
-                                  {label}
-                                </button>
-                              )
-                            })}
-                          </div>
-                        </Field>
+                        <SummaryExtraColumnsField
+                          summaryExtraCols={summaryExtraCols}
+                          excelCombineSheets={excelCombineSheets}
+                          summaryExtraColumnsScope={summaryExtraColumnsScope}
+                          destinationLabel="Summary tab"
+                          onColumnsChange={(next) =>
+                            setValue('summary_extra_columns', next, { shouldDirty: true })
+                          }
+                          onScopeChange={(scope) =>
+                            setValue('summary_extra_columns_scope', scope, { shouldDirty: true })
+                          }
+                        />
                       </>
                     )}
 
@@ -2186,50 +2251,18 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                           )}
                         </Field>
 
-                        {/* Summary sheet extra columns */}
-                        <Field>
-                          <FieldLabel>Summary Sheet Extra Columns</FieldLabel>
-                          <p className="text-xs text-muted-foreground mb-2">
-                            Select which connection metadata to add after the &quot;Sheet Name&quot;
-                            column in the Summary sheet.
-                          </p>
-                          <div className="flex flex-wrap gap-2">
-                            {(
-                              [
-                                { key: 'group_name', label: 'Group Name' },
-                                { key: 'store_name', label: 'Store Name' },
-                                { key: 'fiscal_year_name', label: 'Fiscal Year' },
-                                { key: 'static_ip', label: 'Static IP' },
-                                { key: 'vpn_ip', label: 'VPN IP' },
-                                { key: 'db_name', label: 'Database Name' }
-                              ] as const
-                            ).map(({ key, label }) => {
-                              const selected = summaryExtraCols.includes(key)
-                              return (
-                                <button
-                                  key={key}
-                                  type="button"
-                                  onClick={() => {
-                                    const next = selected
-                                      ? summaryExtraCols.filter((c) => c !== key)
-                                      : [...summaryExtraCols, key]
-                                    setValue('summary_extra_columns', next.length ? next : null, {
-                                      shouldDirty: true
-                                    })
-                                  }}
-                                  className={cn(
-                                    'rounded-md border px-2.5 py-1 text-xs transition-all',
-                                    selected
-                                      ? 'border-primary bg-primary/5 ring-1 ring-primary font-medium'
-                                      : 'border-border hover:border-muted-foreground/40'
-                                  )}
-                                >
-                                  {label}
-                                </button>
-                              )
-                            })}
-                          </div>
-                        </Field>
+                        <SummaryExtraColumnsField
+                          summaryExtraCols={summaryExtraCols}
+                          excelCombineSheets={excelCombineSheets}
+                          summaryExtraColumnsScope={summaryExtraColumnsScope}
+                          destinationLabel="Summary sheet"
+                          onColumnsChange={(next) =>
+                            setValue('summary_extra_columns', next, { shouldDirty: true })
+                          }
+                          onScopeChange={(scope) =>
+                            setValue('summary_extra_columns_scope', scope, { shouldDirty: true })
+                          }
+                        />
 
                         {/* Combine sheets — single-query only */}
                         {!isMulti && (

@@ -384,6 +384,10 @@ async function pushAll(token: string) {
             return null
           }
         })(),
+        summary_extra_columns_scope:
+          (r.summary_extra_columns_scope as string) === 'summary_and_combined'
+            ? 'summary_and_combined'
+            : 'summary_only',
         excel_combine_sheets: Boolean(r.excel_combine_sheets),
         last_failed_connection_ids: lastFailedConnectionIds,
         last_connection_errors: lastConnectionErrors
@@ -462,6 +466,7 @@ type RemoteJob = RemoteBase & {
   lastConnectionErrors: Array<{ id: number; name: string; error: string }> | null
   modifyDates: boolean | null
   summaryExtraColumns: string[] | null
+  summaryExtraColumnsScope: string | null
   excelCombineSheets: boolean | null
 }
 type RemoteJobVariable = RemoteBase & {
@@ -641,13 +646,13 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook,
       template_path, template_mode, schedule, status, last_run_at, last_error,
       last_failed_connection_ids, last_connection_errors,
-      modify_dates, summary_extra_columns, excel_combine_sheets, remote_id
+      modify_dates, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, remote_id
     ) VALUES (
       @name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi,
       @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook,
       @template_path, @template_mode, @schedule, @status, @last_run_at, @last_error,
       @last_failed_connection_ids, @last_connection_errors,
-      @modify_dates, @summary_extra_columns, @excel_combine_sheets, @remote_id
+      @modify_dates, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @remote_id
     )
   `)
   const updateJob = db.prepare(`
@@ -676,6 +681,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       last_connection_errors = @last_connection_errors,
       modify_dates = @modify_dates,
       summary_extra_columns = @summary_extra_columns,
+      summary_extra_columns_scope = @summary_extra_columns_scope,
       excel_combine_sheets = @excel_combine_sheets,
       updated_at = datetime('now')
     WHERE remote_id = @remote_id
@@ -725,6 +731,10 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
         last_connection_errors: JSON.stringify(r.lastConnectionErrors ?? []),
         modify_dates: r.modifyDates != null ? (r.modifyDates ? 1 : 0) : 1,
         summary_extra_columns: r.summaryExtraColumns ? JSON.stringify(r.summaryExtraColumns) : null,
+        summary_extra_columns_scope:
+          r.summaryExtraColumnsScope === 'summary_and_combined'
+            ? 'summary_and_combined'
+            : 'summary_only',
         excel_combine_sheets: r.excelCombineSheets ? 1 : 0,
         remote_id: r.id
       }

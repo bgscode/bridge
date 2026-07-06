@@ -88,8 +88,14 @@
 //   }
 // })
 
-import { app } from 'electron'
+import { app, dialog } from 'electron'
 import { bootstrap } from './app'
+
+// Helps on Windows VMs, RDP, and some GPU drivers where the app otherwise
+// exits immediately with no visible window.
+if (process.platform === 'win32') {
+  app.disableHardwareAcceleration()
+}
 
 // Raise the V8 heap limit for the main process so we can load very large
 // destination workbooks (200 MB+) into memory in order to preserve
@@ -100,7 +106,23 @@ import { bootstrap } from './app'
 // environments this bumps it explicitly.
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=8192')
 
-app.whenReady().then(bootstrap)
+app.whenReady().then(async () => {
+  try {
+    await bootstrap()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error('[main] bootstrap failed:', err)
+    try {
+      dialog.showErrorBox(
+        'Alam failed to start',
+        `${message}\n\nIf this is a fresh install, reinstall the latest build from your admin.`
+      )
+    } catch {
+      // ignore dialog errors
+    }
+    app.quit()
+  }
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

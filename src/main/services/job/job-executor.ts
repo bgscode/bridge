@@ -31,6 +31,10 @@ import {
   type GsheetBucket,
   type GoogleSheetBucketTarget
 } from './gsheet-writer'
+import {
+  createSummaryExtraColumnResolver,
+  labelForSummaryExtraColumn
+} from './summary-extra-columns'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -1385,6 +1389,7 @@ async function writeStreamingExcelCombined(
   connections: ConnectionRow[],
   allChunkFiles: Map<string, string[]>,
   summaryExtraColumns: string[] = [],
+  summaryExtraColumnsScope: 'summary_only' | 'summary_and_combined' = 'summary_only',
   modifyDates = true,
   template?: {
     templatePath: string | null
@@ -1457,6 +1462,15 @@ async function writeStreamingExcelCombined(
   // ── Combined "Data" sheet (all connections, Sheet Name as first column) ──
   const dataSheet = workbook.addWorksheet('Data')
   let globalHeadersSet = false
+  const includeCombinedExtraColumns =
+    summaryExtraColumnsScope === 'summary_and_combined' && summaryExtraColumns.length > 0
+  const combinedExtraResolver = includeCombinedExtraColumns
+    ? createSummaryExtraColumnResolver({
+        keys: summaryExtraColumns,
+        connections,
+        progress
+      })
+    : null
 
   for (const conn of connections) {
     const chunkTag = chunkTagFor(conn.id, null)
@@ -1473,7 +1487,9 @@ async function writeStreamingExcelCombined(
 
         // Write ONE styled header row at the very top — first column is "Sheet Name"
         if (!globalHeadersSet) {
-          const allHeaders = ['Sheet Name', ...rowKeys]
+          const allHeaders = combinedExtraResolver
+            ? ['Sheet Name', ...combinedExtraResolver.labels, ...rowKeys]
+            : ['Sheet Name', ...rowKeys]
           dataSheet.columns = allHeaders.map((h, i) => ({
             width:
               i === 0
@@ -1498,8 +1514,9 @@ async function writeStreamingExcelCombined(
           globalHeadersSet = true
         }
 
+        const extraValues = combinedExtraResolver?.getValues(conn.id) ?? []
         // Sheet Name is the first value in every data row
-        dataSheet.addRow([sheetName, ...values])
+        dataSheet.addRow([sheetName, ...extraValues, ...values])
       })
     }
   }
@@ -2225,69 +2242,23 @@ function writeSummarySheet(
 
   const isMultiQuery = queryNames.length > 0
 
-  // Build lookup maps for extra column resolution (group, store, fiscal year)
-  const extraColKeys = summaryExtraColumns.filter(Boolean)
-  const needsGroupLookup = extraColKeys.includes('group_name')
-  const needsStoreLookup = extraColKeys.includes('store_name')
-  const needsFiscalLookup = extraColKeys.includes('fiscal_year_name')
-
-  const groupMap = new Map<number, string>()
-  const storeMap = new Map<number, string>()
-  const fiscalYearMap = new Map<number, string>()
-
-  if (needsGroupLookup) {
-    for (const g of groupRepository.findAll()) groupMap.set(g.id, g.name)
-  }
-  if (needsStoreLookup) {
-    for (const s of storeRepository.findAll()) storeMap.set(s.id, s.name)
-  }
-  if (needsFiscalLookup) {
-    for (const fy of fiscalYearRepository.findAll()) fiscalYearMap.set(fy.id, fy.name)
-  }
-
-  /** Return the extra column values for a given connection (keyed by column key). */
-  function getExtraValues(connId: number): Record<string, string> {
-    const conn = connections.find((c) => c.id === connId)
-    if (!conn || !extraColKeys.length) return {}
-    const vals: Record<string, string> = {}
-    for (const key of extraColKeys) {
-      switch (key) {
-        case 'group_name':
-          vals[key] = conn.group_id ? (groupMap.get(conn.group_id) ?? '') : ''
-          break
-        case 'store_name':
-          vals[key] = conn.store_id ? (storeMap.get(conn.store_id) ?? '') : ''
-          break
-        case 'fiscal_year_name':
-          vals[key] = conn.fiscal_year_id ? (fiscalYearMap.get(conn.fiscal_year_id) ?? '') : ''
-          break
-        case 'static_ip':
-          vals[key] = conn.static_ip ?? ''
-          break
-        case 'vpn_ip':
-          vals[key] = conn.vpn_ip ?? ''
-          break
-        case 'db_name':
-          vals[key] = conn.db_name ?? ''
-          break
-        default:
-          vals[key] = ''
-      }
-    }
-    return vals
-  }
-
-  const extraColumnDefs: Partial<ExcelJS.Column>[] = extraColKeys.map((key) => {
-    const labels: Record<string, string> = {
-      group_name: 'Group',
-      store_name: 'Store',
-      fiscal_year_name: 'Fiscal Year',
-      static_ip: 'Static IP',
-      vpn_ip: 'VPN IP',
-      db_name: 'Database'
-    }
-    return { header: labels[key] ?? key, key, width: 20 }
+  const extraResolver = createSummaryExtraColumnResolver({
+    keys: summaryExtraColumns,
+    connections,
+    progress
   })
+  const extraColKeys = extraResolver.keys
+
+  function extraValuesObject(connId: number): Record<string, string> {
+    const values = extraResolver.getValues(connId)
+    return Object.fromEntries(extraColKeys.map((key, index) => [key, values[index] ?? '']))
+  }
+
+  const extraColumnDefs: Partial<ExcelJS.Column>[] = extraColKeys.map((key) => ({
+    header: labelForSummaryExtraColumn(key),
+    key,
+    width: 20
+  }))
 
   // Sheet Name is now shown in BOTH single- and multi-query mode so users can
   // always trace a row back to the worksheet that holds its data.
@@ -2373,7 +2344,7 @@ function writeSummarySheet(
       sheet.addRow({
         connection_name: conn.connection_name,
         sheet_name: '',
-        ...getExtraValues(conn.connection_id),
+        ...extraValuesObject(conn.connection_id),
         status: conn.status,
         rows: conn.rows,
         started_at: formatUtcToIst(conn.started_at),
@@ -2405,7 +2376,7 @@ function writeSummarySheet(
       sheet.addRow({
         connection_name: conn.connection_name,
         sheet_name: sheetLabel,
-        ...getExtraValues(conn.connection_id),
+        ...extraValuesObject(conn.connection_id),
         status: conn.status,
         rows: conn.rows,
         started_at: formatUtcToIst(conn.started_at),
@@ -2469,63 +2440,18 @@ function buildGoogleSheetsSummaryRows(
     }
   }
 
-  const extraColKeys = summaryExtraColumns.filter(Boolean)
-  const needsGroupLookup = extraColKeys.includes('group_name')
-  const needsStoreLookup = extraColKeys.includes('store_name')
-  const needsFiscalLookup = extraColKeys.includes('fiscal_year_name')
-
-  const groupMap = new Map<number, string>()
-  const storeMap = new Map<number, string>()
-  const fiscalYearMap = new Map<number, string>()
-
-  if (needsGroupLookup) {
-    for (const group of groupRepository.findAll()) groupMap.set(group.id, group.name)
-  }
-  if (needsStoreLookup) {
-    for (const store of storeRepository.findAll()) storeMap.set(store.id, store.name)
-  }
-  if (needsFiscalLookup) {
-    for (const fiscalYear of fiscalYearRepository.findAll()) {
-      fiscalYearMap.set(fiscalYear.id, fiscalYear.name)
-    }
-  }
-
-  function getExtraValues(connId: number): string[] {
-    const conn = connections.find((connection) => connection.id === connId)
-    if (!conn || extraColKeys.length === 0) return []
-
-    return extraColKeys.map((key) => {
-      switch (key) {
-        case 'group_name':
-          return conn.group_id ? (groupMap.get(conn.group_id) ?? '') : ''
-        case 'store_name':
-          return conn.store_id ? (storeMap.get(conn.store_id) ?? '') : ''
-        case 'fiscal_year_name':
-          return conn.fiscal_year_id ? (fiscalYearMap.get(conn.fiscal_year_id) ?? '') : ''
-        case 'static_ip':
-          return conn.static_ip ?? ''
-        case 'vpn_ip':
-          return conn.vpn_ip ?? ''
-        case 'db_name':
-          return conn.db_name ?? ''
-        default:
-          return ''
-      }
-    })
-  }
-
-  const extraColumnLabels = extraColKeys.map((key) => {
-    const labels: Record<string, string> = {
-      group_name: 'Group',
-      store_name: 'Store',
-      fiscal_year_name: 'Fiscal Year',
-      static_ip: 'Static IP',
-      vpn_ip: 'VPN IP',
-      db_name: 'Database'
-    }
-
-    return labels[key] ?? key
+  const extraResolver = createSummaryExtraColumnResolver({
+    keys: summaryExtraColumns,
+    connections,
+    progress,
+    rowCountByConnectionId: new Map(
+      bucketTargets
+        .filter((target) => typeof target.bucket.connectionId === 'number')
+        .map((target) => [target.bucket.connectionId as number, target.bucket.rowCount ?? 0])
+    )
   })
+  const extraColKeys = extraResolver.keys
+  const extraColumnLabels = extraResolver.labels
 
   const headers = [
     'Connection',
@@ -2586,7 +2512,7 @@ function buildGoogleSheetsSummaryRows(
     rows.push([
       conn.connection_name,
       bucketTarget?.tabName ?? '',
-      ...getExtraValues(conn.connection_id),
+      ...extraResolver.getValues(conn.connection_id),
       conn.status,
       bucketTarget?.bucket.rowCount ?? conn.rows,
       formatUtcToIst(conn.started_at),
@@ -3749,6 +3675,7 @@ export async function runJob(
                 connections,
                 allChunkFiles,
                 job.summary_extra_columns ?? [],
+                job.summary_extra_columns_scope ?? 'summary_only',
                 job.modify_dates !== false,
                 {
                   templatePath: await resolveMachineLocalTemplatePath(job.template_path, job.name),
@@ -3880,6 +3807,22 @@ export async function runJob(
           googleSheetBucketTargets,
           job.summary_extra_columns ?? []
         )
+        const shouldIncludeCombinedExtraColumns =
+          shouldCreateCombinedSheet &&
+          (job.summary_extra_columns_scope ?? 'summary_only') === 'summary_and_combined' &&
+          (job.summary_extra_columns?.length ?? 0) > 0
+        const combinedExtraResolver = shouldIncludeCombinedExtraColumns
+          ? createSummaryExtraColumnResolver({
+              keys: job.summary_extra_columns ?? [],
+              connections,
+              progress,
+              rowCountByConnectionId: new Map(
+                googleSheetBuckets
+                  .filter((bucket) => typeof bucket.connectionId === 'number')
+                  .map((bucket) => [bucket.connectionId as number, bucket.rowCount ?? 0])
+              )
+            })
+          : null
         const googleSheetTotalWriteRows = estimateGoogleSheetTotalWriteRows({
           buckets: googleSheetBuckets,
           combineSheets: shouldCreateCombinedSheet,
@@ -3895,6 +3838,10 @@ export async function runJob(
           buckets: googleSheetBuckets,
           readChunk: readChunkFromFile,
           combineSheets: shouldCreateCombinedSheet,
+          combinedExtraColumnLabels: combinedExtraResolver?.labels,
+          getCombinedExtraValues: combinedExtraResolver
+            ? (connectionId: number) => combinedExtraResolver.getValues(connectionId)
+            : undefined,
           jobProgress: progress,
           summaryRows: googleSheetSummaryRows,
           gsheet_batch_ranges: settings.gsheet_batch_ranges,
