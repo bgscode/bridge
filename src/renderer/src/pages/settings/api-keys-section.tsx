@@ -26,16 +26,17 @@ import {
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-const USER_SCOPES: { id: ApiKeyScope; label: string; description: string }[] = [
+const SCOPE_OPTIONS: { id: ApiKeyScope; label: string; description: string }[] = [
   { id: 'connections:read', label: 'Read', description: 'List and get connections' },
-  { id: 'connections:write', label: 'Write', description: 'Create, update, delete, bulk credentials' }
-]
-
-const ADMIN_EXTRA_SCOPES: { id: ApiKeyScope; label: string; description: string }[] = [
+  {
+    id: 'connections:write',
+    label: 'Write',
+    description: 'Create, update, delete, bulk credentials'
+  },
   {
     id: 'connections:secrets',
     label: 'Secrets',
-    description: 'Include passwords when ?include_secrets=true'
+    description: 'Return connection passwords in API responses'
   }
 ]
 
@@ -60,14 +61,14 @@ export function ApiKeysSection(): JSX.Element {
   const [name, setName] = useState('')
   const [scopes, setScopes] = useState<ApiKeyScope[]>([
     'connections:read',
-    'connections:write'
+    'connections:write',
+    'connections:secrets'
   ])
   const [creating, setCreating] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
 
   const hasToken = Boolean(getToken())
   const isAuthenticated = Boolean(hasToken && user)
-  const isAdmin = user?.role === 'admin'
 
   const loadUser = useCallback(async () => {
     if (!getToken()) {
@@ -126,7 +127,7 @@ export function ApiKeysSection(): JSX.Element {
       setCreatedKey(row)
       setCreateOpen(false)
       setName('')
-      setScopes(['connections:read', 'connections:write'])
+      setScopes(['connections:read', 'connections:write', 'connections:secrets'])
       await load()
       toast.success('API key created — copy it now')
     } catch (err) {
@@ -172,8 +173,6 @@ export function ApiKeysSection(): JSX.Element {
       toast.error('Could not copy — select and copy manually')
     }
   }
-
-  const scopeOptions = isAdmin ? [...USER_SCOPES, ...ADMIN_EXTRA_SCOPES] : USER_SCOPES
 
   if (!authReady) {
     return (
@@ -327,7 +326,7 @@ export function ApiKeysSection(): JSX.Element {
 
             <div className="flex flex-col gap-2">
               <Label>Scopes</Label>
-              {scopeOptions.map((opt) => {
+              {SCOPE_OPTIONS.map((opt) => {
                 const checked = scopes.includes(opt.id)
                 return (
                   <label
