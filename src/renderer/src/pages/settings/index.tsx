@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { getToken } from '@/lib/api'
 import type { AppSettings } from '@shared/index'
+import { ApiKeysSection } from './api-keys-section'
 
 // ─── Schema ────────────────────────────────────────────────────────────────────
 
@@ -189,7 +190,13 @@ export default function SettingsPage(): JSX.Element {
       {/* Page header */}
       <div className="border-b px-6 py-5">
         <h1 className="text-base font-semibold">Settings</h1>
-        <p className="text-muted-foreground text-sm">Manage monitor behaviour and performance.</p>
+        <p className="text-muted-foreground text-sm">
+          Manage monitor behaviour, performance, and external API access.
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-4 px-6 pt-6" style={{ maxWidth: 680 }}>
+        <ApiKeysSection />
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)} className="flex flex-1 flex-col">

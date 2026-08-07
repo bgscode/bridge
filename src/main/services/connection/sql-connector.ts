@@ -1,3 +1,4 @@
+import { performance } from 'perf_hooks'
 import { ConnectionRow } from '@shared/index'
 import mssql, { config } from 'mssql'
 
@@ -41,6 +42,8 @@ function getErrorMessage(err: unknown): string {
 export interface TestResult {
   success: boolean
   connectedVia: 'static_ip' | 'vpn_ip' | null
+  /** Connect + SELECT 1 round-trip in milliseconds when successful. */
+  latencyMs: number | null
   error: string | null
 }
 
@@ -132,13 +135,25 @@ export async function testConnection(
   timeoutSec: number = 15
 ): Promise<TestResult> {
   let connected: ConnectedPoolResult | null = null
+  const started = performance.now()
 
   try {
     connected = await connectUsingBestIp(conn, timeoutSec, 10)
     await connected.pool.request().query('SELECT 1 AS test')
-    return { success: true, connectedVia: connected.connectedVia, error: null }
+    const latencyMs = Math.max(0, Math.round(performance.now() - started))
+    return {
+      success: true,
+      connectedVia: connected.connectedVia,
+      latencyMs,
+      error: null
+    }
   } catch (err) {
-    return { success: false, connectedVia: null, error: getErrorMessage(err) }
+    return {
+      success: false,
+      connectedVia: null,
+      latencyMs: null,
+      error: getErrorMessage(err)
+    }
   } finally {
     connected?.pool.close().catch(() => {})
   }

@@ -208,6 +208,44 @@ export const connectionsApi = {
     api.post<ServerConnection>('/connections/assign', { connectionId, userId })
 }
 
+// ── API Keys (external connection API access) ───────────────────────────────
+
+export type ApiKeyScope =
+  | 'connections:read'
+  | 'connections:write'
+  | 'connections:secrets'
+  | 'connections:*'
+  | '*'
+
+export interface ApiKeyRecord {
+  id: string
+  owner_id: string
+  name: string
+  key_prefix: string
+  scopes: string[]
+  expires_at: string | null
+  revoked_at: string | null
+  last_used_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CreatedApiKey extends ApiKeyRecord {
+  key: string
+  warning: string
+}
+
+export const apiKeysApi = {
+  list: () => api.get<ApiKeyRecord[]>('/api-keys'),
+  create: (input: {
+    name: string
+    scopes: ApiKeyScope[]
+    expires_at?: string | null
+  }) => api.post<CreatedApiKey>('/api-keys', input),
+  revoke: (id: string) => api.post<void>(`/api-keys/${id}/revoke`),
+  remove: (id: string) => api.delete<void>(`/api-keys/${id}`)
+}
+
 // ── Jobs ────────────────────────────────────────────────────────────────────
 
 export const jobsApi = {

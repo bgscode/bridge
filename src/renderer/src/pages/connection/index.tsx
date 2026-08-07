@@ -19,7 +19,7 @@ import { toast } from 'sonner'
 import { useConnections, useGroups, useStores, useFiscalYears } from '@/contexts'
 import { useAuth } from '@/contexts/auth-context'
 import { downloadConnectionTemplate } from './utils/template'
-import { StatusBadge } from './components/status-badge'
+import { LatencyBadge, PathBadge, StatusBadge } from './components/status-badge'
 import { formatUtcToIst } from '@renderer/lib/utils'
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
@@ -54,7 +54,11 @@ export default function ConnectionPage(): JSX.Element {
 
   useEffect(() => {
     window.api.connections.onTestProgress((data) => {
-      updateStatus(data.id, data.status)
+      updateStatus(data.id, {
+        status: data.status,
+        connected_via: data.connected_via,
+        latency_ms: data.latency_ms
+      })
     })
     return () => window.api.connections.offTestProgress()
   }, [updateStatus])
@@ -290,6 +294,13 @@ export default function ConnectionPage(): JSX.Element {
           ? (stores.find((s) => s.id === Number(row.store_id))?.name ?? String(row.store_id))
           : '',
       status: String(row.status ?? ''),
+      path:
+        row.connected_via === 'static_ip'
+          ? 'Static'
+          : row.connected_via === 'vpn_ip'
+            ? 'VPN'
+            : '',
+      latency_ms: row.latency_ms != null ? Number(row.latency_ms) : '',
       last_tested: formatUtcToIst(row.updated_at)
     }))
   }
@@ -329,6 +340,8 @@ export default function ConnectionPage(): JSX.Element {
       fiscal_year_id: '',
       store_id: '',
       status: '',
+      path: '',
+      latency_ms: '',
       last_tested: ''
     }
 
@@ -446,6 +459,27 @@ export default function ConnectionPage(): JSX.Element {
       }
     },
     {
+      accessorKey: 'connected_via',
+      header: 'Path',
+      cell: ({ row }) => <PathBadge via={row.original.connected_via} />,
+      meta: {
+        filterType: 'select',
+        filterOptions: [
+          { label: 'Static', value: 'static_ip' },
+          { label: 'VPN', value: 'vpn_ip' }
+        ],
+        resizable: true
+      }
+    },
+    {
+      accessorKey: 'latency_ms',
+      header: 'Speed',
+      cell: ({ row }) => (
+        <LatencyBadge ms={row.original.latency_ms} status={row.original.status} />
+      ),
+      meta: { filterType: 'number', resizable: true }
+    },
+    {
       accessorKey: 'created_at',
       header: 'Created',
       meta: { filterType: 'date', resizable: true }
@@ -479,8 +513,8 @@ export default function ConnectionPage(): JSX.Element {
     }
   ]
 
-  // User role: only Name + Status columns (no sensitive fields, no actions).
-  const USER_VISIBLE_COLS = new Set(['name', 'status'])
+  // User role: status + path/speed only (no sensitive fields, no actions).
+  const USER_VISIBLE_COLS = new Set(['name', 'status', 'connected_via', 'latency_ms'])
   const columns = isAdmin
     ? allColumns
     : allColumns.filter((c) =>

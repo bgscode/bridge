@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import type { JobRow, JobProgress, CreateJobDto, UpdateJobDto, JobRunOptions } from '@shared/index'
-import { JobsContext } from './use-jobs'
+import { JobsContext, RunningJobsContext } from './use-jobs'
 
 // ─── Provider ────────────────────────────────────────────────────────────────
 
@@ -123,11 +123,17 @@ export function JobsProvider({ children }: { children: ReactNode }): ReactNode {
     (id: number, options?: JobRunOptions): void => {
       const job = jobs.find((j) => j.id === id)
       toast.info(`Running "${job?.name ?? 'Job'}"…`)
+      // Optimistic row status so the table shows Running without waiting for
+      // the first progress event (which lives on a separate context).
+      setJobs((prev) =>
+        prev.map((j) => (j.id === id ? { ...j, status: 'running' as const } : j))
+      )
       window.api.jobs.run(id, options).catch((err: Error) => {
         toast.error(err.message)
+        reload()
       })
     },
-    [jobs]
+    [jobs, reload]
   )
 
   const cancel = useCallback((id: number): void => {
@@ -139,24 +145,43 @@ export function JobsProvider({ children }: { children: ReactNode }): ReactNode {
     setRunningJobs((prev) => prev.filter((p) => p.job_id !== id))
   }, [])
 
+  // Keep list/actions stable while progress ticks update `runningJobs` so the
+  // jobs table (and open ⋮ menus) are not remounted every progress event.
+  const jobsValue = useMemo(
+    () => ({
+      jobs,
+      create,
+      update,
+      updateConnections,
+      remove,
+      removeMany,
+      bulkCreate,
+      run,
+      cancel,
+      reload
+    }),
+    [
+      jobs,
+      create,
+      update,
+      updateConnections,
+      remove,
+      removeMany,
+      bulkCreate,
+      run,
+      cancel,
+      reload
+    ]
+  )
+
+  const runningValue = useMemo(
+    () => ({ runningJobs, dismissJob }),
+    [runningJobs, dismissJob]
+  )
+
   return (
-    <JobsContext.Provider
-      value={{
-        jobs,
-        runningJobs,
-        create,
-        update,
-        updateConnections,
-        remove,
-        removeMany,
-        bulkCreate,
-        run,
-        cancel,
-        dismissJob,
-        reload
-      }}
-    >
-      {children}
+    <JobsContext.Provider value={jobsValue}>
+      <RunningJobsContext.Provider value={runningValue}>{children}</RunningJobsContext.Provider>
     </JobsContext.Provider>
   )
 }

@@ -1,5 +1,11 @@
 import { createContext, useContext } from 'react'
-import type { ConnectionRow, CreateConnectionDto } from '@shared/index'
+import type { ConnectionPath, ConnectionRow, CreateConnectionDto } from '@shared/index'
+
+export interface ConnectionStatusPatch {
+  status: string
+  connected_via?: ConnectionPath | null
+  latency_ms?: number | null
+}
 
 export interface ConnectionsContextValue {
   connections: ConnectionRow[]
@@ -13,7 +19,7 @@ export interface ConnectionsContextValue {
     creds: { username?: string; password?: string }
   ) => Promise<ConnectionRow[]>
   reload: () => void
-  updateStatus: (id: number, status: string) => void
+  updateStatus: (id: number, patch: string | ConnectionStatusPatch) => void
 }
 
 export const ConnectionsContext = createContext<ConnectionsContextValue | null>(null)

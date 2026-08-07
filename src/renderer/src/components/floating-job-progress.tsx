@@ -20,7 +20,7 @@ import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
 import { Separator } from '@/components/ui/separator'
 import { cn } from '@/lib/utils'
-import { useJobs } from '@/contexts'
+import { useJobs, useRunningJobs } from '@/contexts'
 import type { JobProgress, JobConnectionProgress, JobAdaptiveState } from '@shared/index'
 
 // ─── Adaptive engine row ─────────────────────────────────────────────────────
@@ -516,7 +516,7 @@ function useDraggable(
 // ─── Floating indicator ──────────────────────────────────────────────────────
 
 export function FloatingJobProgress(): JSX.Element | null {
-  const { runningJobs, dismissJob } = useJobs()
+  const { runningJobs, dismissJob } = useRunningJobs()
   const [minimized, setMinimized] = useState(false)
   const panelRef = useRef<HTMLDivElement>(null)
   const { pos, handlers } = useDraggable(

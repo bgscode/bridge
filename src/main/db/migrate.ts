@@ -445,6 +445,21 @@ const migrations: Migration[] = [
         )
       }
     }
+  },
+  {
+    version: 27,
+    fn(db: Database.Database): void {
+      // Last successful probe: which path won (static vs VPN) and RTT in ms.
+      const cols = (db.prepare('PRAGMA table_info(connections)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('connected_via')) {
+        db.exec('ALTER TABLE connections ADD COLUMN connected_via TEXT DEFAULT NULL')
+      }
+      if (!cols.includes('latency_ms')) {
+        db.exec('ALTER TABLE connections ADD COLUMN latency_ms INTEGER DEFAULT NULL')
+      }
+    }
   }
 ]
 

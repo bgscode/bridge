@@ -34,8 +34,15 @@ const api = {
     deleteAll: (ids: number[]) => ipcRenderer.invoke('connections:deleteAll', ids),
     test: (id: number) => ipcRenderer.invoke('connections:test', id),
     testAll: (ids: number[]) => ipcRenderer.invoke('connections:testAll', ids),
-    onTestProgress: (cb: (data: { id: number; status: string; error: string | null }) => void) =>
-      ipcRenderer.on('connections:test-progress', (_e, data) => cb(data)),
+    onTestProgress: (
+      cb: (data: {
+        id: number
+        status: string
+        error: string | null
+        connected_via: 'static_ip' | 'vpn_ip' | null
+        latency_ms: number | null
+      }) => void
+    ) => ipcRenderer.on('connections:test-progress', (_e, data) => cb(data)),
     offTestProgress: () => ipcRenderer.removeAllListeners('connections:test-progress')
   },
   jobs: {

@@ -55,7 +55,15 @@ declare global {
         deleteAll: (ids: number[]) => Promise<void>
         test: (id: number) => Promise<void>
         testAll: (ids: number[]) => Promise<void>
-        onTestProgress: (cb: (data: { id: number; status: string; error: string | null }) => void) => void // prettier-ignore
+        onTestProgress: (
+          cb: (data: {
+            id: number
+            status: string
+            error: string | null
+            connected_via: 'static_ip' | 'vpn_ip' | null
+            latency_ms: number | null
+          }) => void
+        ) => void
         offTestProgress: () => void
       }
       jobs: {

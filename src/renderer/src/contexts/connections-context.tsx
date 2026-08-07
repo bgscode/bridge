@@ -95,9 +95,19 @@ export function ConnectionsProvider({ children }: { children: ReactNode }): Reac
     []
   )
 
-  const updateStatus = useCallback((id: number, status: string) => {
+  const updateStatus = useCallback((id: number, patch: string | { status: string; connected_via?: ConnectionRow['connected_via']; latency_ms?: number | null }) => {
+    const data = typeof patch === 'string' ? { status: patch } : patch
     setConnections((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, status: status as ConnectionRow['status'] } : c))
+      prev.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              status: data.status as ConnectionRow['status'],
+              ...(data.connected_via !== undefined ? { connected_via: data.connected_via } : {}),
+              ...(data.latency_ms !== undefined ? { latency_ms: data.latency_ms } : {})
+            }
+          : c
+      )
     )
   }, [])
 

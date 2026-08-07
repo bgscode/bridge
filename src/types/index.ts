@@ -134,6 +134,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
+export type ConnectionPath = 'static_ip' | 'vpn_ip'
+
 export interface ConnectionRow {
   id: number
   name: string
@@ -147,6 +149,10 @@ export interface ConnectionRow {
   fiscal_year_id: number | null
   store_id: number | null
   status: 'online' | 'offline' | 'failed' | 'unknown'
+  /** Which endpoint answered last successful probe (`null` if offline/unknown). */
+  connected_via: ConnectionPath | null
+  /** Round-trip connect + SELECT 1 latency in ms from last probe. */
+  latency_ms: number | null
   remote_id?: string | null
   created_at: string
   updated_at: string
@@ -154,7 +160,7 @@ export interface ConnectionRow {
 
 export type CreateConnectionDto = Omit<
   ConnectionRow,
-  'id' | 'remote_id' | 'created_at' | 'updated_at'
+  'id' | 'remote_id' | 'created_at' | 'updated_at' | 'connected_via' | 'latency_ms'
 >
 export type UpdateConnectionDto = Partial<
   Omit<ConnectionRow, 'id' | 'remote_id' | 'created_at' | 'updated_at'>

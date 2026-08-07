@@ -30,19 +30,26 @@ interface RowActionsMenuProps {
 
 export function RowActionsMenu({ onEdit, onDuplicate, onDelete, extraItems }: RowActionsMenuProps) {
   return (
-    <DropdownMenu>
+    // modal={false}: don't lock focus / dismiss on foreign DOM updates (e.g.
+    // the floating job-progress panel refreshing while a job runs).
+    <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
           size="icon"
           className="size-7 data-[state=open]:bg-accent"
           onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
         >
           <MoreHorizontal className="size-4" />
           <span className="sr-only">Open menu</span>
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-40">
+      <DropdownMenuContent
+        align="end"
+        className="w-40"
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
         {onEdit && (
           <DropdownMenuItem
             onClick={(e) => {

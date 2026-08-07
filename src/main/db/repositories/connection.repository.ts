@@ -64,6 +64,29 @@ export const connection = {
     return this.findById(id)
   },
 
+  /**
+   * Persist probe results. `connected_via` / `latency_ms` may be null on
+   * failure so previous path/latency is cleared (COALESCE would keep them).
+   */
+  updateProbeResult(
+    id: number,
+    data: {
+      status: ConnectionRow['status']
+      connected_via: ConnectionRow['connected_via']
+      latency_ms: number | null
+    }
+  ): ConnectionRow | undefined {
+    db.prepare(
+      `UPDATE connections SET
+         status        = @status,
+         connected_via = @connected_via,
+         latency_ms    = @latency_ms,
+         updated_at    = datetime('now')
+       WHERE id = @id`
+    ).run({ ...data, id })
+    return this.findById(id)
+  },
+
   bulkCreate(items: CreateConnectionDto[]): ConnectionRow[] {
     const stmt = db.prepare(`
       INSERT INTO connections
