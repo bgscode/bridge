@@ -217,6 +217,11 @@ export default function JobsPage(): JSX.Element {
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
         !values.is_multi
           ? (values.excel_combine_sheets ?? false)
+          : false,
+      skip_failed_connection_sheets:
+        !isAction &&
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets')
+          ? (values.skip_failed_connection_sheets ?? false)
           : false
     }
     if (formMode === 'create') {
@@ -248,7 +253,8 @@ export default function JobsPage(): JSX.Element {
       schedule: job.schedule,
       summary_extra_columns: job.summary_extra_columns,
       summary_extra_columns_scope: job.summary_extra_columns_scope ?? 'summary_only',
-      excel_combine_sheets: job.excel_combine_sheets
+      excel_combine_sheets: job.excel_combine_sheets,
+      skip_failed_connection_sheets: job.skip_failed_connection_sheets
     })
   }
 

@@ -389,6 +389,7 @@ async function pushAll(token: string) {
             ? 'summary_and_combined'
             : 'summary_only',
         excel_combine_sheets: Boolean(r.excel_combine_sheets),
+        skip_failed_connection_sheets: Boolean(r.skip_failed_connection_sheets),
         last_failed_connection_ids: lastFailedConnectionIds,
         last_connection_errors: lastConnectionErrors
       }
@@ -468,6 +469,7 @@ type RemoteJob = RemoteBase & {
   summaryExtraColumns: string[] | null
   summaryExtraColumnsScope: string | null
   excelCombineSheets: boolean | null
+  skipFailedConnectionSheets: boolean | null
 }
 type RemoteJobVariable = RemoteBase & {
   jobId: string
@@ -646,13 +648,13 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook,
       template_path, template_mode, schedule, status, last_run_at, last_error,
       last_failed_connection_ids, last_connection_errors,
-      modify_dates, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, remote_id
+      modify_dates, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, skip_failed_connection_sheets, remote_id
     ) VALUES (
       @name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi,
       @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook,
       @template_path, @template_mode, @schedule, @status, @last_run_at, @last_error,
       @last_failed_connection_ids, @last_connection_errors,
-      @modify_dates, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @remote_id
+      @modify_dates, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @skip_failed_connection_sheets, @remote_id
     )
   `)
   const updateJob = db.prepare(`
@@ -683,6 +685,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       summary_extra_columns = @summary_extra_columns,
       summary_extra_columns_scope = @summary_extra_columns_scope,
       excel_combine_sheets = @excel_combine_sheets,
+      skip_failed_connection_sheets = @skip_failed_connection_sheets,
       updated_at = datetime('now')
     WHERE remote_id = @remote_id
   `)
@@ -736,6 +739,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
             ? 'summary_and_combined'
             : 'summary_only',
         excel_combine_sheets: r.excelCombineSheets ? 1 : 0,
+        skip_failed_connection_sheets: r.skipFailedConnectionSheets ? 1 : 0,
         remote_id: r.id
       }
       const existing = findJob.get(r.id) as { id: number } | undefined

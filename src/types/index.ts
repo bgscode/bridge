@@ -214,6 +214,12 @@ export interface JobRow {
    */
   summary_extra_columns_scope: SummaryExtraColumnsScope
   excel_combine_sheets: boolean
+  /**
+   * When true, failed connections (timeout, offline, query error) keep their
+   * existing Excel / Google Sheet tab unchanged. Summary still records the
+   * failure. Default false — failed connections get an error sheet.
+   */
+  skip_failed_connection_sheets: boolean
   // schedule — JSON string, see ScheduleConfig
   schedule: string | null
   // runtime state

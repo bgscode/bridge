@@ -5,7 +5,10 @@ import { jobRepository } from '../../db/repositories/job.repository'
 import { connection as connectionRepo } from '../../db/repositories/connection.repository'
 import { settingsRepo } from '../../db/repositories/settings.repository'
 import { connectUsingBestIp } from '../connection/sql-connector'
-import { readActionFileRows } from './action-file-preview'
+import {
+  materializeActionFileChunks,
+  readActionChunkFile
+} from './action-file-preview'
 import { buildActionBatchPlan, type ActionWriteMode } from './action-batch-writer'
 
 interface ActionJobConfig {
@@ -175,25 +178,34 @@ export async function runActionJob(jobId: number, webContents: WebContents): Pro
   emit(webContents, progress)
   jobRepository.update(jobId, { status: 'running' } as Partial<JobRow>)
 
+  let chunkStore: Awaited<ReturnType<typeof materializeActionFileChunks>> | null = null
+
   try {
     const config = parseActionJobConfig(job)
-    const fileData = await readActionFileRows(config.filePath, { sheetName: config.sheetName })
-    const mapped = mapRowsToTargetColumns(
-      fileData.headers,
-      fileData.rows,
-      config.columnMapping ?? {}
-    )
+    // Stream the source file into bounded NDJSON chunks on disk — never load
+    // millions of rows into a single in-memory array.
+    chunkStore = await materializeActionFileChunks(config.filePath, {
+      sheetName: config.sheetName,
+      chunkSize: config.batchSize
+    })
 
-    if (mapped.rows.length === 0) {
+    if (chunkStore.totalRows === 0) {
       throw new Error('Action file has no data rows after mapping')
     }
+
+    // Probe mapping / key columns from headers only (no full row load).
+    const mappedProbe = mapRowsToTargetColumns(
+      chunkStore.headers,
+      [],
+      config.columnMapping ?? {}
+    )
 
     const inferredKeyColumns =
       config.keyColumns.length > 0
         ? config.keyColumns
-        : mapped.targetHeaders.includes('id')
+        : mappedProbe.targetHeaders.includes('id')
           ? ['id']
-          : [mapped.targetHeaders[0]]
+          : [mappedProbe.targetHeaders[0]]
 
     // Run connections in parallel with a bounded worker pool so that a job
     // against many connections doesn't serialize end-to-end.
@@ -206,7 +218,7 @@ export async function runActionJob(jobId: number, webContents: WebContents): Pro
     const runOne = async (index: number): Promise<void> => {
       const conn = connections[index]
       const connProgress = progress.connections[index]
-      if (!conn || !connProgress) return
+      if (!conn || !connProgress || !chunkStore) return
       connProgress.status = 'connecting'
       connProgress.started_at = new Date().toISOString()
       emit(webContents, progress)
@@ -217,26 +229,36 @@ export async function runActionJob(jobId: number, webContents: WebContents): Pro
         connProgress.status = 'querying'
         emit(webContents, progress)
 
-        for (let i = 0; i < mapped.rows.length; i += config.batchSize) {
-          const batch = mapped.rows.slice(i, i + config.batchSize)
-          if (batch.length === 0) continue
+        for (const chunkFile of chunkStore.chunkFiles) {
+          const sourceRows = await readActionChunkFile(chunkFile)
+          const mapped = mapRowsToTargetColumns(
+            chunkStore.headers,
+            sourceRows,
+            config.columnMapping ?? {}
+          )
+          if (mapped.rows.length === 0) continue
 
-          const plan = buildActionBatchPlan({
-            mode: config.mode,
-            table: config.table,
-            keyColumns: inferredKeyColumns,
-            rows: batch
-          })
+          for (let i = 0; i < mapped.rows.length; i += config.batchSize) {
+            const batch = mapped.rows.slice(i, i + config.batchSize)
+            if (batch.length === 0) continue
 
-          const request = connected.pool.request()
-          for (const [name, value] of Object.entries(plan.params)) {
-            request.input(name, value as string | number | boolean | Date | null)
+            const plan = buildActionBatchPlan({
+              mode: config.mode,
+              table: config.table,
+              keyColumns: inferredKeyColumns,
+              rows: batch
+            })
+
+            const request = connected.pool.request()
+            for (const [name, value] of Object.entries(plan.params)) {
+              request.input(name, value as string | number | boolean | Date | null)
+            }
+            await request.query(plan.sql)
+
+            connProgress.rows += batch.length
+            progress.total_rows += batch.length
+            emit(webContents, progress)
           }
-          await request.query(plan.sql)
-
-          connProgress.rows += batch.length
-          progress.total_rows += batch.length
-          emit(webContents, progress)
         }
 
         connProgress.status = 'done'
@@ -277,6 +299,10 @@ export async function runActionJob(jobId: number, webContents: WebContents): Pro
   } catch (error) {
     progress.status = 'failed'
     progress.error = error instanceof Error ? error.message : 'Action job execution failed'
+  } finally {
+    if (chunkStore) {
+      await chunkStore.cleanup()
+    }
   }
 
   progress.finished_at = new Date().toISOString()

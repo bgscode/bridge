@@ -14,7 +14,8 @@ const mocks = vi.hoisted(() => ({
     getAll: vi.fn(() => ({ job_query_timeout: 30 }))
   },
   connectUsingBestIpMock: vi.fn(),
-  readActionFileRowsMock: vi.fn(),
+  materializeActionFileChunksMock: vi.fn(),
+  readActionChunkFileMock: vi.fn(),
   existsSyncMock: vi.fn(() => true)
 }))
 
@@ -23,7 +24,8 @@ const {
   connectionRepoMock,
   settingsRepoMock,
   connectUsingBestIpMock,
-  readActionFileRowsMock
+  materializeActionFileChunksMock,
+  readActionChunkFileMock
 } = mocks
 
 vi.mock('../../../db/repositories/job.repository', () => ({
@@ -39,7 +41,8 @@ vi.mock('../../connection/sql-connector', () => ({
   connectUsingBestIp: mocks.connectUsingBestIpMock
 }))
 vi.mock('../action-file-preview', () => ({
-  readActionFileRows: mocks.readActionFileRowsMock
+  materializeActionFileChunks: mocks.materializeActionFileChunksMock,
+  readActionChunkFile: mocks.readActionChunkFileMock
 }))
 
 vi.mock('fs', async () => {
@@ -153,10 +156,18 @@ describe('runActionJob', () => {
     connectionRepoMock.findById.mockImplementation((id: number) => baseConnection(id))
 
     const rows = Array.from({ length: 250 }, (_, i) => ({ id: i + 1, price: i }))
-    readActionFileRowsMock.mockResolvedValue({
+    // Simulate 3 on-disk chunks (100 + 100 + 50) — mirrors streaming materialize.
+    materializeActionFileChunksMock.mockResolvedValue({
       fileType: 'csv',
       headers: ['id', 'price'],
-      rows
+      chunkFiles: ['/tmp/c0.ndjson', '/tmp/c1.ndjson', '/tmp/c2.ndjson'],
+      totalRows: 250,
+      cleanup: vi.fn().mockResolvedValue(undefined)
+    })
+    readActionChunkFileMock.mockImplementation(async (fp: string) => {
+      if (fp.endsWith('c0.ndjson')) return rows.slice(0, 100)
+      if (fp.endsWith('c1.ndjson')) return rows.slice(100, 200)
+      return rows.slice(200)
     })
 
     const poolA = makeMockPool()
@@ -184,14 +195,17 @@ describe('runActionJob', () => {
   it('isolates failures: one connection fails, other still succeeds', async () => {
     jobRepoMock.findById.mockReturnValue(baseJob())
     connectionRepoMock.findById.mockImplementation((id: number) => baseConnection(id))
-    readActionFileRowsMock.mockResolvedValue({
+    materializeActionFileChunksMock.mockResolvedValue({
       fileType: 'csv',
       headers: ['id', 'price'],
-      rows: [
-        { id: 1, price: 5 },
-        { id: 2, price: 10 }
-      ]
+      chunkFiles: ['/tmp/c0.ndjson'],
+      totalRows: 2,
+      cleanup: vi.fn().mockResolvedValue(undefined)
     })
+    readActionChunkFileMock.mockResolvedValue([
+      { id: 1, price: 5 },
+      { id: 2, price: 10 }
+    ])
 
     const poolGood = makeMockPool()
     const poolBad = makeMockPool({ failQuery: true })
@@ -244,11 +258,14 @@ describe('runActionJob', () => {
       })
     )
     connectionRepoMock.findById.mockImplementation((id: number) => baseConnection(id))
-    readActionFileRowsMock.mockResolvedValue({
+    materializeActionFileChunksMock.mockResolvedValue({
       fileType: 'csv',
       headers: ['sku', 'qty', 'ignored_col'],
-      rows: [{ sku: 'ABC', qty: 7, ignored_col: 'x' }]
+      chunkFiles: ['/tmp/c0.ndjson'],
+      totalRows: 1,
+      cleanup: vi.fn().mockResolvedValue(undefined)
     })
+    readActionChunkFileMock.mockResolvedValue([{ sku: 'ABC', qty: 7, ignored_col: 'x' }])
 
     const pool = makeMockPool()
     connectUsingBestIpMock.mockResolvedValue({ pool: pool.pool, connectedVia: 'A' })

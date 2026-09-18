@@ -151,7 +151,8 @@ function buildJobBody(row: JobRow, mode: 'create' | 'update' = 'update'): Record
     modify_dates: row.modify_dates !== false,
     summary_extra_columns: row.summary_extra_columns ?? null,
     summary_extra_columns_scope: row.summary_extra_columns_scope ?? 'summary_only',
-    excel_combine_sheets: !!row.excel_combine_sheets
+    excel_combine_sheets: !!row.excel_combine_sheets,
+    skip_failed_connection_sheets: !!row.skip_failed_connection_sheets
   }
   // On create, omit job_group_id when null — sending null causes the server
   // to emit `jobGroup: { disconnect: true }` which Prisma rejects on create.
@@ -173,12 +174,15 @@ function buildLegacyJobBody(
   delete body.job_color
   delete body.summary_extra_columns
   delete body.excel_combine_sheets
+  delete body.skip_failed_connection_sheets
 
   return body
 }
 
 function isLegacyJobFieldError(message: string): boolean {
-  return /Unknown argument `(jobColor|summaryExtraColumns|excelCombineSheets)`/i.test(message)
+  return /Unknown argument `(jobColor|summaryExtraColumns|excelCombineSheets|skipFailedConnectionSheets)`/i.test(
+    message
+  )
 }
 
 export async function mirrorJobCreate(row: JobRow): Promise<void> {

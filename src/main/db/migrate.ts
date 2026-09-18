@@ -460,6 +460,19 @@ const migrations: Migration[] = [
         db.exec('ALTER TABLE connections ADD COLUMN latency_ms INTEGER DEFAULT NULL')
       }
     }
+  },
+  {
+    version: 28,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('skip_failed_connection_sheets')) {
+        db.exec(
+          'ALTER TABLE jobs ADD COLUMN skip_failed_connection_sheets INTEGER NOT NULL DEFAULT 0'
+        )
+      }
+    }
   }
 ]
 

@@ -35,6 +35,10 @@ import {
   createSummaryExtraColumnResolver,
   labelForSummaryExtraColumn
 } from './summary-extra-columns'
+import {
+  rewriteXlsxPreservingOtherSheets,
+  type OpenXmlSheetSpec
+} from './xlsx-openxml-stream'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -42,8 +46,14 @@ import {
 const CHUNK_SIZE = 5000
 /** Abort a connection if it exceeds this many rows (safety valve) */
 const MAX_ROWS_PER_CONNECTION = 20_000_000
+/**
+ * Above this many rows, NEVER build an in-memory ExcelJS.Workbook.
+ * Use stream.xlsx.WorkbookWriter so rows are flushed to disk as they are
+ * written — keeps RAM flat even for 10M+ row jobs.
+ */
+const IN_MEMORY_EXCEL_ROW_LIMIT = 100_000
 /** Append mode on huge datasets is memory-heavy with XLSX merge; switch to fresh file above this */
-const APPEND_SAFE_ROW_LIMIT = 200_000
+const APPEND_SAFE_ROW_LIMIT = IN_MEMORY_EXCEL_ROW_LIMIT
 /**
  * Skip in-place workbook loading above this file size to avoid OOM.
  * writeInPlaceExcelReplace returns null so the caller falls back to the
@@ -1005,19 +1015,34 @@ interface BucketMeta {
   rows: number
 }
 
+function failedConnectionIdsFromProgress(
+  progress: JobProgress,
+  enabled: boolean
+): Set<number> {
+  const ids = new Set<number>()
+  if (!enabled) return ids
+  for (const conn of progress.connections) {
+    if (conn.status === 'error' || conn.error) ids.add(conn.connection_id)
+  }
+  return ids
+}
+
 function listOutputBuckets(
   connections: ConnectionRow[],
   allChunkFiles: Map<string, string[]>,
   queryNames: string[] = [],
-  allBucketMeta: Map<string, BucketMeta> = new Map()
+  allBucketMeta: Map<string, BucketMeta> = new Map(),
+  skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): OutputBucket[] {
   const connById = new Map(connections.map((c) => [c.id, c]))
   const buckets: OutputBucket[] = []
   const seenTags = new Set<string>()
+  const skipFailed = (connId: number): boolean => skipFailedConnectionIds.has(connId)
   for (const [tag, chunkFiles] of allChunkFiles) {
     if (!chunkFiles || chunkFiles.length === 0) continue
-    seenTags.add(tag)
     const { connId, queryIdx } = parseChunkTag(tag)
+    if (skipFailed(connId)) continue
+    seenTags.add(tag)
     const connection = connById.get(connId)
     const meta = allBucketMeta.get(tag)
     buckets.push({
@@ -1033,12 +1058,14 @@ function listOutputBuckets(
   }
 
   // Always emit a bucket for any tag that has metadata with an error (so we
-  // can write a header + error row file) even when no rows were captured.
+  // can write a header + error row file) even when no rows were captured —
+  // unless the job opted to leave failed connection sheets unchanged.
   for (const [tag, meta] of allBucketMeta) {
     if (seenTags.has(tag)) continue
     if (!meta.error) continue
-    seenTags.add(tag)
     const { connId, queryIdx } = parseChunkTag(tag)
+    if (skipFailed(connId)) continue
+    seenTags.add(tag)
     const connection = connById.get(connId)
     buckets.push({
       tag,
@@ -1063,6 +1090,7 @@ function listOutputBuckets(
       Array.from(allChunkFiles.keys()).some((k) => parseChunkTag(k).queryIdx !== null)
 
     for (const conn of connections) {
+      if (skipFailed(conn.id)) continue
       if (isMultiQ) {
         // Multi-query: emit one empty bucket per query index that is missing.
         const queryCount = Math.max(1, queryNames.length)
@@ -1251,8 +1279,26 @@ async function writeInPlaceExcelReplace(
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
   modifyDates = true,
-  summaryExtraColumns: string[] = []
+  summaryExtraColumns: string[] = [],
+  skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): Promise<string | null> {
+  // Decide buckets first so we can refuse large datasets BEFORE allocating
+  // an in-memory workbook (10M+ rows × cells would OOM the process).
+  const buckets = listOutputBuckets(
+    connections,
+    allChunkFiles,
+    queryNames,
+    allBucketMeta,
+    skipFailedConnectionIds
+  )
+  const estimatedRows =
+    progress.total_rows > 0
+      ? progress.total_rows
+      : buckets.reduce((sum, b) => sum + (b.rows || 0), 0)
+  if (estimatedRows > IN_MEMORY_EXCEL_ROW_LIMIT) {
+    return null
+  }
+
   const workbook = new ExcelJS.Workbook()
   const fileExists = fs.existsSync(filePath)
   if (fileExists) {
@@ -1276,7 +1322,6 @@ async function writeInPlaceExcelReplace(
   // and fall straight through to the bucket-sheet writer below, which
   // adds the new sheets and saves to `filePath`.
 
-  const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
   const patterns = bucketSheetNamePatterns(buckets)
 
   // Remove ONLY the sheets this job owns: previous bucket sheets (incl.
@@ -1381,6 +1426,750 @@ async function writeInPlaceExcelReplace(
   return filePath
 }
 
+/**
+ * Build a compact Summary sheet spec for the OpenXML path (no ExcelJS).
+ * Summary is tiny (one row per connection) so we materialize its rows up front.
+ */
+function buildOpenXmlSummarySheetSpec(
+  jobName: string,
+  progress: JobProgress,
+  connections: ConnectionRow[],
+  queryNames: string[],
+  allBucketMeta: Map<string, BucketMeta>,
+  summaryExtraColumns: string[]
+): OpenXmlSheetSpec {
+  const startedAt = progress.started_at
+  const finishedAt = progress.finished_at ?? new Date().toISOString()
+  const durationSeconds = Math.max(
+    0,
+    Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1000)
+  )
+  const successCount = progress.total_connections - progress.failed_connections
+  const errorRate =
+    progress.total_connections > 0
+      ? Math.round((progress.failed_connections / progress.total_connections) * 100)
+      : 0
+
+  const connLabelMap = new Map<number, string>()
+  for (const c of connections) {
+    connLabelMap.set(c.id, resolveConnectionLabel(c))
+  }
+
+  const extraColKeys = summaryExtraColumns.filter(Boolean)
+  const extraLabels: Record<string, string> = {
+    group_name: 'Group',
+    store_name: 'Store',
+    fiscal_year_name: 'Fiscal Year',
+    static_ip: 'Static IP',
+    vpn_ip: 'VPN IP',
+    db_name: 'Database'
+  }
+  const groupMap = new Map<number, string>()
+  const storeMap = new Map<number, string>()
+  const fiscalYearMap = new Map<number, string>()
+  if (extraColKeys.includes('group_name')) {
+    for (const group of groupRepository.findAll()) groupMap.set(group.id, group.name)
+  }
+  if (extraColKeys.includes('store_name')) {
+    for (const store of storeRepository.findAll()) storeMap.set(store.id, store.name)
+  }
+  if (extraColKeys.includes('fiscal_year_name')) {
+    for (const fiscalYear of fiscalYearRepository.findAll()) {
+      fiscalYearMap.set(fiscalYear.id, fiscalYear.name)
+    }
+  }
+  const extraValuesFor = (connId: number): string[] => {
+    const conn = connections.find((c) => c.id === connId)
+    if (!conn) return extraColKeys.map(() => '')
+    return extraColKeys.map((key) => {
+      if (key === 'group_name') return conn.group_id ? (groupMap.get(conn.group_id) ?? '') : ''
+      if (key === 'store_name') return conn.store_id ? (storeMap.get(conn.store_id) ?? '') : ''
+      if (key === 'fiscal_year_name') {
+        return conn.fiscal_year_id ? (fiscalYearMap.get(conn.fiscal_year_id) ?? '') : ''
+      }
+      if (key === 'static_ip') return conn.static_ip ?? ''
+      if (key === 'vpn_ip') return conn.vpn_ip ?? ''
+      if (key === 'db_name') return conn.db_name ?? ''
+      return ''
+    })
+  }
+
+  const rows: unknown[][] = []
+  rows.push([
+    'Connection',
+    'Sheet Name',
+    ...extraColKeys.map((key) => extraLabels[key] ?? key),
+    'Status',
+    'Rows',
+    'Started At',
+    'Finished At',
+    'Duration (s)',
+    'Error Category',
+    'Failure Reason'
+  ])
+  rows.push([
+    `Job: ${jobName}`,
+    '',
+    ...extraColKeys.map(() => ''),
+    progress.status,
+    progress.total_rows,
+    formatUtcToIst(startedAt),
+    formatUtcToIst(finishedAt),
+    durationSeconds,
+    categorizeError(progress.error),
+    progress.error ?? ''
+  ])
+  rows.push([
+    `Summary: ${successCount}/${progress.total_connections} successful`,
+    '',
+    ...extraColKeys.map(() => ''),
+    progress.failed_connections > 0 ? 'partial' : 'ok',
+    progress.total_rows,
+    '',
+    '',
+    '',
+    `${errorRate}% Error Rate`,
+    progress.failed_connections > 0 ? `${progress.failed_connections} connection(s) failed` : ''
+  ])
+  rows.push([])
+
+  const isMultiQuery = queryNames.length > 0
+  for (const conn of progress.connections) {
+    const connDuration =
+      conn.started_at && conn.finished_at
+        ? Math.max(
+            0,
+            Math.round(
+              (new Date(conn.finished_at).getTime() - new Date(conn.started_at).getTime()) / 1000
+            )
+          )
+        : 0
+    const sheetLabel = connLabelMap.get(conn.connection_id) ?? conn.connection_name
+    if (isMultiQuery) {
+      rows.push([
+        conn.connection_name,
+        '',
+        ...extraValuesFor(conn.connection_id),
+        conn.status,
+        conn.rows,
+        formatUtcToIst(conn.started_at),
+        formatUtcToIst(conn.finished_at),
+        connDuration,
+        categorizeError(conn.error),
+        conn.error ?? ''
+      ])
+      const connRow = connections.find((c) => c.id === conn.connection_id)
+      for (let qi = 0; qi < queryNames.length; qi++) {
+        const tag = `c${conn.connection_id}-q${qi}`
+        const meta = allBucketMeta.get(tag)
+        const qLabel = queryNames[qi]?.trim() || `Query ${qi + 1}`
+        const querySheetLabel = sanitizeSheetName(chunkSheetLabel(connRow, qi, queryNames))
+        rows.push([
+          `  ↳ ${qLabel}`,
+          querySheetLabel,
+          ...extraValuesFor(conn.connection_id),
+          meta?.error ? 'error' : meta !== undefined ? 'done' : '',
+          meta?.error ? 0 : (meta?.rows ?? 0),
+          '',
+          '',
+          '',
+          meta?.error ? categorizeError(meta.error) : '',
+          meta?.error ?? ''
+        ])
+      }
+    } else {
+      rows.push([
+        conn.connection_name,
+        sheetLabel,
+        ...extraValuesFor(conn.connection_id),
+        conn.status,
+        conn.rows,
+        formatUtcToIst(conn.started_at),
+        formatUtcToIst(conn.finished_at),
+        connDuration,
+        categorizeError(conn.error),
+        conn.error ?? ''
+      ])
+    }
+  }
+
+  return {
+    name: 'Summary',
+    write: async (writeRow) => {
+      for (const row of rows) await writeRow(row)
+    }
+  }
+}
+
+function buildOpenXmlBucketSheetSpecs(
+  buckets: OutputBucket[],
+  modifyDates: boolean,
+  taken: Set<string>
+): OpenXmlSheetSpec[] {
+  const threshold = resolveSheetRowThreshold()
+  const specs: OpenXmlSheetSpec[] = []
+
+  for (const bucket of buckets) {
+    const baseSheetName = sanitizeSheetName(bucket.label)
+    const partCount =
+      bucket.chunkFiles.length === 0
+        ? 1
+        : Math.max(1, Math.ceil(Math.max(bucket.rows, 1) / threshold))
+    const partNames: string[] = []
+    for (let i = 0; i < partCount; i++) {
+      // Always keep part 0 as the bare base name ("Data", store name, …)
+      // so an uploaded template's existing sheet is REWRITTEN in place.
+      // Only overflow rows create `_part2`, `_part3`, … — never rename the
+      // first sheet to `_part1` (that would break formulas like Data!A:A).
+      partNames.push(nextRolloverSheetName(baseSheetName, i, taken, false))
+    }
+
+    for (let partIdx = 0; partIdx < partNames.length; partIdx++) {
+      const sheetName = partNames[partIdx]
+      const partStart = partIdx * threshold
+      const partEnd = (partIdx + 1) * threshold
+      specs.push({
+        name: sheetName,
+        write: async (writeRow) => {
+          if (bucket.chunkFiles.length === 0) {
+            const headers =
+              bucket.columns.length > 0
+                ? bucket.error
+                  ? [...bucket.columns, 'Error']
+                  : [...bucket.columns]
+                : bucket.error
+                  ? ['Error']
+                  : ['No rows found']
+            await writeRow(headers)
+            if (bucket.error) {
+              await writeRow(headers.map((h) => (h === 'Error' ? bucket.error : '')))
+            } else if (!bucket.columns.length) {
+              await writeRow(['No rows found'])
+            }
+            return
+          }
+
+          let headers: string[] | null = null
+          let dataIndex = 0
+          let wroteHeader = false
+
+          for (const chunkFile of bucket.chunkFiles) {
+            await streamChunkRows(chunkFile, async (row) => {
+              if (!headers) headers = Object.keys(row)
+              if (dataIndex >= partStart && dataIndex < partEnd) {
+                if (!wroteHeader) {
+                  await writeRow(headers!)
+                  wroteHeader = true
+                }
+                await writeRow(
+                  headers!.map((key) => (modifyDates ? formatQueryValue(row[key]) : row[key]))
+                )
+              }
+              dataIndex++
+            })
+          }
+
+          // Empty part (row estimate overshot) — still emit a header if we can.
+          if (!wroteHeader) {
+            if (headers) await writeRow(headers)
+            else if (bucket.columns.length > 0) await writeRow([...bucket.columns])
+            else await writeRow(['No rows found'])
+          }
+        }
+      })
+    }
+  }
+
+  return specs
+}
+
+/**
+ * Large-dataset replace into an EXISTING workbook: stream only owned sheet
+ * XML via OpenXML ZIP rewrite. Formula/chart/pivot sheets stay untouched.
+ */
+async function writeOpenXmlExcelReplace(
+  filePath: string,
+  jobName: string,
+  progress: JobProgress,
+  connections: ConnectionRow[],
+  allChunkFiles: Map<string, string[]>,
+  queryNames: string[] = [],
+  allBucketMeta: Map<string, BucketMeta> = new Map(),
+  modifyDates = true,
+  summaryExtraColumns: string[] = [],
+  skipFailedConnectionIds: ReadonlySet<number> = new Set()
+): Promise<string> {
+  const buckets = listOutputBuckets(
+    connections,
+    allChunkFiles,
+    queryNames,
+    allBucketMeta,
+    skipFailedConnectionIds
+  )
+  const patterns = bucketSheetNamePatterns(buckets)
+  const taken = new Set<string>(['summary'])
+  const bucketSpecs = buildOpenXmlBucketSheetSpecs(buckets, modifyDates, taken)
+  const summarySpec = buildOpenXmlSummarySheetSpec(
+    jobName,
+    progress,
+    connections,
+    queryNames,
+    allBucketMeta,
+    summaryExtraColumns
+  )
+
+  return rewriteXlsxPreservingOtherSheets({
+    sourcePath: filePath,
+    destPath: filePath,
+    isOwnedSheet: (name) => isBucketSheetName(name, patterns),
+    sheets: [...bucketSpecs, summarySpec]
+  })
+}
+
+/**
+ * Combined-mode large write into an existing template: stream Data (+parts)
+ * and bucket sheets via OpenXML; preserve every other sheet bit-exact.
+ */
+async function writeOpenXmlExcelCombined(
+  filePath: string,
+  jobName: string,
+  progress: JobProgress,
+  connections: ConnectionRow[],
+  allChunkFiles: Map<string, string[]>,
+  summaryExtraColumns: string[] = [],
+  summaryExtraColumnsScope: 'summary_only' | 'summary_and_combined' = 'summary_only',
+  modifyDates = true
+): Promise<string> {
+  const threshold = resolveSheetRowThreshold()
+  const taken = new Set<string>(['summary'])
+
+  const includeCombinedExtraColumns =
+    summaryExtraColumnsScope === 'summary_and_combined' && summaryExtraColumns.length > 0
+  const combinedExtraResolver = includeCombinedExtraColumns
+    ? createSummaryExtraColumnResolver({
+        keys: summaryExtraColumns,
+        connections,
+        progress
+      })
+    : null
+
+  const dataPartCount = Math.max(1, Math.ceil(Math.max(progress.total_rows, 1) / threshold))
+  const dataPartNames: string[] = []
+  for (let i = 0; i < dataPartCount; i++) {
+    // Keep first sheet named exactly "Data" so template formulas that
+    // reference Data!… keep working; only overflow gets Data_part2+.
+    dataPartNames.push(nextRolloverSheetName('Data', i, taken, false))
+  }
+
+  const dataSpecs: OpenXmlSheetSpec[] = dataPartNames.map((sheetName, partIdx) => {
+    const partStart = partIdx * threshold
+    const partEnd = (partIdx + 1) * threshold
+    return {
+      name: sheetName,
+      write: async (writeRow) => {
+        let headers: string[] | null = null
+        let dataIndex = 0
+        let wroteHeader = false
+
+        for (const conn of connections) {
+          const chunkTag = chunkTagFor(conn.id, null)
+          const chunkFiles = allChunkFiles.get(chunkTag) ?? []
+          if (chunkFiles.length === 0) continue
+          const sheetLabel = resolveConnectionLabel(conn)
+
+          for (const chunkFile of chunkFiles) {
+            await streamChunkRows(chunkFile, async (row) => {
+              const fmtRow = formatQueryRow(row, modifyDates)
+              const rowKeys = Object.keys(fmtRow)
+              const values = Object.values(fmtRow) as unknown[]
+              if (!headers) {
+                headers = combinedExtraResolver
+                  ? ['Sheet Name', ...combinedExtraResolver.labels, ...rowKeys]
+                  : ['Sheet Name', ...rowKeys]
+              }
+              if (dataIndex >= partStart && dataIndex < partEnd) {
+                if (!wroteHeader) {
+                  await writeRow(headers)
+                  wroteHeader = true
+                }
+                const extraValues = combinedExtraResolver?.getValues(conn.id) ?? []
+                await writeRow([sheetLabel, ...extraValues, ...values])
+              }
+              dataIndex++
+            })
+          }
+        }
+
+        if (!wroteHeader) {
+          await writeRow(headers ?? ['No rows found'])
+        }
+      }
+    }
+  })
+
+  // Existing template: only rewrite Data (+overflow parts) and Summary.
+  // Do NOT invent per-connection sheets — those would be brand-new tabs the
+  // user never had in their uploaded workbook.
+  const summarySpec = buildOpenXmlSummarySheetSpec(
+    jobName,
+    progress,
+    connections,
+    [],
+    new Map(),
+    summaryExtraColumns
+  )
+
+  return rewriteXlsxPreservingOtherSheets({
+    sourcePath: filePath,
+    destPath: filePath,
+    isOwnedSheet: (name) => {
+      const lc = name.toLowerCase()
+      if (lc === 'summary') return true
+      if (lc === 'data') return true
+      if (lc.startsWith('data') && /_part\d+$/.test(lc)) return true
+      return false
+    },
+    sheets: [...dataSpecs, summarySpec]
+  })
+}
+
+/**
+ * True streaming combined-excel writer (WorkbookWriter). Used when the
+ * dataset is too large to hold in an in-memory ExcelJS.Workbook.
+ * Writes a combined "Data" sheet (with sheet-row rollover), per-bucket
+ * sheets, and a Summary — flushing every row to disk via `.commit()`.
+ */
+async function writeStreamingExcelCombinedStream(
+  filePath: string,
+  jobName: string,
+  progress: JobProgress,
+  connections: ConnectionRow[],
+  allChunkFiles: Map<string, string[]>,
+  summaryExtraColumns: string[] = [],
+  summaryExtraColumnsScope: 'summary_only' | 'summary_and_combined' = 'summary_only',
+  modifyDates = true,
+  skipFailedConnectionIds: ReadonlySet<number> = new Set()
+): Promise<string> {
+  let resolvedDir = path.dirname(filePath)
+  try {
+    if (!fs.existsSync(resolvedDir)) await fs.promises.mkdir(resolvedDir, { recursive: true })
+  } catch {
+    resolvedDir = appDesktopBaseDir()
+    await fs.promises.mkdir(resolvedDir, { recursive: true })
+    filePath = path.join(resolvedDir, path.basename(filePath))
+  }
+
+  // Overwrite any existing destination — streaming writer cannot surgically
+  // preserve other sheets while also streaming millions of data rows.
+  if (fs.existsSync(filePath)) {
+    try {
+      await fs.promises.unlink(filePath)
+    } catch {
+      // best-effort; WorkbookWriter will truncate on create
+    }
+  }
+
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: filePath,
+    useStyles: true,
+    useSharedStrings: false
+  })
+
+  try {
+    const threshold = resolveSheetRowThreshold()
+    const taken = new Set<string>(['summary'])
+    const buckets = listOutputBuckets(
+      connections,
+      allChunkFiles,
+      [],
+      new Map(),
+      skipFailedConnectionIds
+    )
+
+    const includeCombinedExtraColumns =
+      summaryExtraColumnsScope === 'summary_and_combined' && summaryExtraColumns.length > 0
+    const combinedExtraResolver = includeCombinedExtraColumns
+      ? createSummaryExtraColumnResolver({
+          keys: summaryExtraColumns,
+          connections,
+          progress
+        })
+      : null
+
+    // ── Combined "Data" sheet (all connections) with rollover ──────────────
+    const willSplitData = progress.total_rows > threshold
+    let dataRollover = 0
+    let dataSheet = workbook.addWorksheet(
+      nextRolloverSheetName('Data', 0, taken, willSplitData)
+    )
+    let dataHeaders: string[] = []
+    let dataHeadersSet = false
+    let dataRowsInSheet = 0
+
+    const writeDataHeader = (): void => {
+      const hr = dataSheet.addRow(dataHeaders)
+      hr.commit()
+      dataRowsInSheet = 1
+    }
+
+    for (const conn of connections) {
+      const chunkTag = chunkTagFor(conn.id, null)
+      const chunkFiles = allChunkFiles.get(chunkTag) ?? []
+      if (chunkFiles.length === 0) continue
+      const sheetName = resolveConnectionLabel(conn)
+
+      for (const chunkFile of chunkFiles) {
+        await streamChunkRows(chunkFile, (row) => {
+          const fmtRow = formatQueryRow(row, modifyDates)
+          const rowKeys = Object.keys(fmtRow)
+          const values = Object.values(fmtRow) as unknown[]
+
+          if (!dataHeadersSet) {
+            dataHeaders = combinedExtraResolver
+              ? ['Sheet Name', ...combinedExtraResolver.labels, ...rowKeys]
+              : ['Sheet Name', ...rowKeys]
+            writeDataHeader()
+            dataHeadersSet = true
+          }
+
+          if (dataRowsInSheet >= threshold) {
+            dataSheet.commit()
+            dataRollover++
+            dataSheet = workbook.addWorksheet(
+              nextRolloverSheetName('Data', dataRollover, taken, willSplitData)
+            )
+            writeDataHeader()
+          }
+
+          const extraValues = combinedExtraResolver?.getValues(conn.id) ?? []
+          dataSheet.addRow([sheetName, ...extraValues, ...values]).commit()
+          dataRowsInSheet++
+        })
+      }
+    }
+
+    if (dataHeadersSet) {
+      dataSheet.commit()
+    } else {
+      // No rows at all — still emit an empty Data sheet with a placeholder.
+      dataSheet.addRow(['No rows found']).commit()
+      dataSheet.commit()
+    }
+
+    // ── Individual per-connection sheets ───────────────────────────────────
+    for (const bucket of buckets) {
+      const baseSheetName = sanitizeSheetName(bucket.label)
+      const willSplit = bucket.rows > threshold
+      let rolloverIndex = 0
+      let sheet = workbook.addWorksheet(nextRolloverSheetName(baseSheetName, 0, taken, willSplit))
+      let headers: string[] = []
+      let hasHeader = false
+      let rowsInSheet = 0
+
+      const writeHeader = (): void => {
+        sheet.addRow(headers).commit()
+        rowsInSheet = 1
+      }
+
+      if (bucket.chunkFiles.length === 0) {
+        if (bucket.columns.length > 0) {
+          headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
+        } else if (bucket.error) {
+          headers = ['Error']
+        } else {
+          headers = ['No rows found']
+        }
+        writeHeader()
+        if (bucket.error) {
+          sheet.addRow(headers.map((h) => (h === 'Error' ? bucket.error : ''))).commit()
+        } else if (!bucket.columns.length) {
+          sheet.addRow(['No rows found']).commit()
+        }
+        sheet.commit()
+        continue
+      }
+
+      for (const chunkFile of bucket.chunkFiles) {
+        await streamChunkRows(chunkFile, (row) => {
+          if (!hasHeader) {
+            headers = Object.keys(row)
+            writeHeader()
+            hasHeader = true
+          }
+          if (rowsInSheet >= threshold) {
+            sheet.commit()
+            rolloverIndex++
+            sheet = workbook.addWorksheet(
+              nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
+            )
+            writeHeader()
+          }
+          const values = headers.map(
+            (key) => (modifyDates ? formatQueryValue(row[key]) : row[key]) as ExcelJS.CellValue
+          )
+          sheet.addRow(values).commit()
+          rowsInSheet++
+        })
+      }
+      sheet.commit()
+    }
+
+    // ── Summary (mirrors writeStreamingExcelReplace summary) ───────────────
+    const summary = workbook.addWorksheet('Summary')
+    const startedAt = progress.started_at
+    const finishedAt = progress.finished_at ?? new Date().toISOString()
+    const durationSeconds = Math.max(
+      0,
+      Math.round((new Date(finishedAt).getTime() - new Date(startedAt).getTime()) / 1000)
+    )
+    const successCount = progress.total_connections - progress.failed_connections
+    const errorRate =
+      progress.total_connections > 0
+        ? Math.round((progress.failed_connections / progress.total_connections) * 100)
+        : 0
+
+    const connLabelMap = new Map<number, string>()
+    for (const c of connections) {
+      connLabelMap.set(c.id, resolveConnectionLabel(c))
+    }
+
+    const extraColKeys = summaryExtraColumns.filter(Boolean)
+    const extraLabels: Record<string, string> = {
+      group_name: 'Group',
+      store_name: 'Store',
+      fiscal_year_name: 'Fiscal Year',
+      static_ip: 'Static IP',
+      vpn_ip: 'VPN IP',
+      db_name: 'Database'
+    }
+    const groupMap = new Map<number, string>()
+    const storeMap = new Map<number, string>()
+    const fiscalYearMap = new Map<number, string>()
+    if (extraColKeys.includes('group_name')) {
+      for (const group of groupRepository.findAll()) groupMap.set(group.id, group.name)
+    }
+    if (extraColKeys.includes('store_name')) {
+      for (const store of storeRepository.findAll()) storeMap.set(store.id, store.name)
+    }
+    if (extraColKeys.includes('fiscal_year_name')) {
+      for (const fiscalYear of fiscalYearRepository.findAll()) {
+        fiscalYearMap.set(fiscalYear.id, fiscalYear.name)
+      }
+    }
+    const extraValuesFor = (connId: number): string[] => {
+      const conn = connections.find((c) => c.id === connId)
+      if (!conn) return extraColKeys.map(() => '')
+      return extraColKeys.map((key) => {
+        if (key === 'group_name') return conn.group_id ? (groupMap.get(conn.group_id) ?? '') : ''
+        if (key === 'store_name') return conn.store_id ? (storeMap.get(conn.store_id) ?? '') : ''
+        if (key === 'fiscal_year_name') {
+          return conn.fiscal_year_id ? (fiscalYearMap.get(conn.fiscal_year_id) ?? '') : ''
+        }
+        if (key === 'static_ip') return conn.static_ip ?? ''
+        if (key === 'vpn_ip') return conn.vpn_ip ?? ''
+        if (key === 'db_name') return conn.db_name ?? ''
+        return ''
+      })
+    }
+
+    const summaryHeaders = [
+      'Connection',
+      'Sheet Name',
+      ...extraColKeys.map((key) => extraLabels[key] ?? key),
+      'Status',
+      'Rows',
+      'Started At',
+      'Finished At',
+      'Duration (s)',
+      'Error Category',
+      'Failure Reason'
+    ]
+    const summaryHeaderRow = summary.addRow(summaryHeaders)
+    summaryHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' } }
+    summaryHeaderRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0F766E' }
+    }
+    summaryHeaderRow.commit()
+
+    summary
+      .addRow([
+        `Job: ${jobName}`,
+        '',
+        ...extraColKeys.map(() => ''),
+        progress.status,
+        progress.total_rows,
+        formatUtcToIst(startedAt),
+        formatUtcToIst(finishedAt),
+        durationSeconds,
+        categorizeError(progress.error),
+        progress.error ?? ''
+      ])
+      .commit()
+
+    summary
+      .addRow([
+        `Summary: ${successCount}/${progress.total_connections} successful`,
+        '',
+        ...extraColKeys.map(() => ''),
+        progress.failed_connections > 0 ? 'partial' : 'ok',
+        progress.total_rows,
+        '',
+        '',
+        '',
+        `${errorRate}% Error Rate`,
+        progress.failed_connections > 0 ? `${progress.failed_connections} connection(s) failed` : ''
+      ])
+      .commit()
+
+    summary.addRow([]).commit()
+
+    for (const conn of progress.connections) {
+      const connDuration =
+        conn.started_at && conn.finished_at
+          ? Math.max(
+              0,
+              Math.round(
+                (new Date(conn.finished_at).getTime() - new Date(conn.started_at).getTime()) / 1000
+              )
+            )
+          : 0
+      const sheetLabel = connLabelMap.get(conn.connection_id) ?? conn.connection_name
+      summary
+        .addRow([
+          conn.connection_name,
+          sheetLabel,
+          ...extraValuesFor(conn.connection_id),
+          conn.status,
+          conn.rows,
+          formatUtcToIst(conn.started_at),
+          formatUtcToIst(conn.finished_at),
+          connDuration,
+          categorizeError(conn.error),
+          conn.error ?? ''
+        ])
+        .commit()
+    }
+
+    summary.commit()
+    await workbook.commit()
+    return filePath
+  } catch (err) {
+    try {
+      await workbook.commit()
+    } catch {
+      // ignore
+    }
+    try {
+      if (fs.existsSync(filePath)) await fs.promises.unlink(filePath)
+    } catch {
+      // best-effort
+    }
+    throw err
+  }
+}
+
 async function writeStreamingExcelCombined(
   destPath: string,
   operation: 'append' | 'replace' | null,
@@ -1394,7 +2183,8 @@ async function writeStreamingExcelCombined(
   template?: {
     templatePath: string | null
     templateMode: 'new' | 'existing' | null
-  }
+  },
+  skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): Promise<string> {
   const templatePath = template?.templatePath ?? null
   const templateMode = template?.templateMode ?? null
@@ -1422,6 +2212,52 @@ async function writeStreamingExcelCombined(
     filePath = path.join(baseDir, parsed.base)
   }
 
+  // Large datasets: never build an in-memory Workbook — stream to disk.
+  const estimatedCombinedRows =
+    progress.total_rows > 0
+      ? progress.total_rows
+      : listOutputBuckets(
+          connections,
+          allChunkFiles,
+          [],
+          new Map(),
+          skipFailedConnectionIds
+        ).reduce((sum, b) => sum + (b.rows || 0), 0)
+  if (estimatedCombinedRows > IN_MEMORY_EXCEL_ROW_LIMIT) {
+    // Prefer OpenXML surgical rewrite when a destination/template already
+    // exists — keeps formula/chart/pivot sheets byte-exact while streaming
+    // only Data (+parts) / bucket / Summary sheet XML.
+    if (fs.existsSync(filePath)) {
+      try {
+        return await writeOpenXmlExcelCombined(
+          filePath,
+          jobName,
+          progress,
+          connections,
+          allChunkFiles,
+          summaryExtraColumns,
+          summaryExtraColumnsScope,
+          modifyDates
+        )
+      } catch (err) {
+        progress.error =
+          progress.error ??
+          `OpenXML template preserve failed (${err instanceof Error ? err.message : String(err)}) — rebuilt workbook`
+      }
+    }
+    return writeStreamingExcelCombinedStream(
+      filePath,
+      jobName,
+      progress,
+      connections,
+      allChunkFiles,
+      summaryExtraColumns,
+      summaryExtraColumnsScope,
+      modifyDates,
+      skipFailedConnectionIds
+    )
+  }
+
   // ── Load existing workbook (replace mode) ────────────────────────────────
   // When replace is requested and the file already exists, load it so that
   // any user-added sheets (reports, formula tabs, charts …) are preserved.
@@ -1430,7 +2266,13 @@ async function writeStreamingExcelCombined(
   // to a fresh workbook.
   const workbook = new ExcelJS.Workbook()
   const fileExists = fs.existsSync(filePath)
-  const buckets = listOutputBuckets(connections, allChunkFiles, [], new Map())
+  const buckets = listOutputBuckets(
+    connections,
+    allChunkFiles,
+    [],
+    new Map(),
+    skipFailedConnectionIds
+  )
   const bucketPatterns = bucketSheetNamePatterns(buckets)
 
   if (operation === 'replace' && fileExists) {
@@ -1607,7 +2449,8 @@ async function writeStreamingExcel(
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
   modifyDates = true,
-  summaryExtraColumns: string[] = []
+  summaryExtraColumns: string[] = [],
+  skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): Promise<string> {
   let filePath: string
   let effectiveOp = operation
@@ -1647,55 +2490,101 @@ async function writeStreamingExcel(
 
   // ── Replace short-circuit ────────────────────────────────────────────────
   // `replace` means "overwrite the destination workbook with this run's
-  // output". The legacy in-memory path below would `workbook.xlsx.readFile`
-  // an existing destination first, which OOMs on large (80 MB+) workbooks.
-  // For replace we always go through the streaming writer regardless of
-  // whether the destination file already exists or whether a template was
-  // provided — the template's previous contents are intentionally discarded.
+  // output". For small datasets we prefer the in-place ExcelJS workbook so
+  // user-added sheets (Reports, charts, pivots …) are preserved bit-exact.
+  // For large datasets we MUST use WorkbookWriter — holding millions of
+  // addRow() cells in the V8 heap will OOM regardless of --max-old-space-size.
   if (effectiveOp === 'replace') {
-    // Replace mode: keep ALL user-added sheets (Reports, formula tabs,
-    // charts, pivots, named ranges …) intact. We only rewrite the sheets
-    // this job owns — the per-connection bucket sheets and the Summary.
-    //
-    // Strategy (single, uniform path):
-    //   • The in-place helper handles BOTH cases:
-    //       1. File exists → load it with ExcelJS, remove only bucket +
-    //          Summary sheets, write the new bucket + Summary sheets back
-    //          into the SAME workbook, save. Every other sheet round-trips
-    //          bit-exact (formulas, conditional formatting, merged cells,
-    //          charts, named ranges, …).
-    //       2. File does NOT exist → start with a fresh workbook, add the
-    //          bucket sheets + Summary, save at `filePath`. There are no
-    //          user sheets to preserve in this case, so nothing is lost.
-    //   • Only when an EXISTING workbook can't be opened (corrupt / locked
-    //     / OOM) does the helper return `null` and we fall back to the
-    //     streaming writer, guaranteeing the run still produces output.
-    const written = await writeInPlaceExcelReplace(
-      filePath,
-      jobName,
-      progress,
-      connections,
-      allChunkFiles,
-      queryNames,
-      allBucketMeta,
-      modifyDates,
-      summaryExtraColumns
-    )
-    if (written) return written
+    const estimatedRows =
+      progress.total_rows > 0
+        ? progress.total_rows
+        : listOutputBuckets(
+            connections,
+            allChunkFiles,
+            queryNames,
+            allBucketMeta,
+            skipFailedConnectionIds
+          ).reduce((sum, b) => sum + (b.rows || 0), 0)
+    const useInPlace = estimatedRows <= IN_MEMORY_EXCEL_ROW_LIMIT
 
-    // In-place load failed for an existing file. Surface a warning so
-    // the user knows manually-added sheets in that file weren't carried
-    // over by this fallback path, then write a fresh workbook via the
-    // streaming writer.
-    progress.error =
-      progress.error ??
-      'Could not open destination workbook to preserve user-added sheets — wrote a fresh workbook'
-    try {
-      if (fs.existsSync(filePath)) await fs.promises.unlink(filePath)
-    } catch {
-      // Best-effort: if we can't delete (e.g. file locked), the writer
-      // below will overwrite via its create-truncate semantics anyway.
+    // Large datasets into an existing workbook/template: OpenXML stream-rewrite
+    // of owned sheets only — formulas/charts/pivots on other sheets stay untouched
+    // and RAM stays flat (no ExcelJS Workbook of millions of rows).
+    if (!useInPlace && fs.existsSync(filePath)) {
+      try {
+        return await writeOpenXmlExcelReplace(
+          filePath,
+          jobName,
+          progress,
+          connections,
+          allChunkFiles,
+          queryNames,
+          allBucketMeta,
+          modifyDates,
+          summaryExtraColumns,
+          skipFailedConnectionIds
+        )
+      } catch (err) {
+        progress.error =
+          progress.error ??
+          `OpenXML template preserve failed (${err instanceof Error ? err.message : String(err)}) — rebuilt workbook`
+        try {
+          await fs.promises.unlink(filePath)
+        } catch {
+          // best-effort; streaming rebuild will overwrite
+        }
+      }
     }
+
+    if (useInPlace) {
+      // Replace mode: keep ALL user-added sheets (Reports, formula tabs,
+      // charts, pivots, named ranges …) intact. We only rewrite the sheets
+      // this job owns — the per-connection bucket sheets and the Summary.
+      //
+      // Strategy (single, uniform path):
+      //   • The in-place helper handles BOTH cases:
+      //       1. File exists → load it with ExcelJS, remove only bucket +
+      //          Summary sheets, write the new bucket + Summary sheets back
+      //          into the SAME workbook, save. Every other sheet round-trips
+      //          bit-exact (formulas, conditional formatting, merged cells,
+      //          charts, named ranges, …).
+      //       2. File does NOT exist → start with a fresh workbook, add the
+      //          bucket sheets + Summary, save at `filePath`. There are no
+      //          user sheets to preserve in this case, so nothing is lost.
+      //   • Only when an EXISTING workbook can't be opened (corrupt / locked
+      //     / OOM) does the helper return `null` and we fall back to the
+      //     streaming writer, guaranteeing the run still produces output.
+      const written = await writeInPlaceExcelReplace(
+        filePath,
+        jobName,
+        progress,
+        connections,
+        allChunkFiles,
+        queryNames,
+        allBucketMeta,
+        modifyDates,
+        summaryExtraColumns,
+        skipFailedConnectionIds
+      )
+      if (written) return written
+
+      // In-place load failed for an existing file. Surface a warning so
+      // the user knows manually-added sheets in that file weren't carried
+      // over by this fallback path, then write a fresh workbook via the
+      // streaming writer.
+      if (fs.existsSync(filePath)) {
+        progress.error =
+          progress.error ??
+          'Could not open destination workbook to preserve user-added sheets — wrote a fresh workbook'
+        try {
+          await fs.promises.unlink(filePath)
+        } catch {
+          // Best-effort: if we can't delete (e.g. file locked), the writer
+          // below will overwrite via its create-truncate semantics anyway.
+        }
+      }
+    }
+
     return await writeStreamingExcelReplace(
       filePath,
       jobName,
@@ -1706,7 +2595,8 @@ async function writeStreamingExcel(
       allBucketMeta,
       undefined,
       modifyDates,
-      summaryExtraColumns
+      summaryExtraColumns,
+      skipFailedConnectionIds
     )
   }
 
@@ -1752,7 +2642,8 @@ async function writeStreamingExcel(
       allBucketMeta,
       undefined,
       modifyDates,
-      summaryExtraColumns
+      summaryExtraColumns,
+      skipFailedConnectionIds
     )
   }
 
@@ -1770,7 +2661,13 @@ async function writeStreamingExcel(
   for (const ws of workbook.worksheets) taken.add(ws.name.toLowerCase())
   taken.add('summary')
 
-  const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
+  const buckets = listOutputBuckets(
+    connections,
+    allChunkFiles,
+    queryNames,
+    allBucketMeta,
+    skipFailedConnectionIds
+  )
   for (const bucket of buckets) {
     // Cancel does NOT abort the writer mid-flight (see writeStreamingExcelReplace).
     const baseSheetName = sanitizeSheetName(bucket.label)
@@ -1898,7 +2795,8 @@ async function writeStreamingExcelReplace(
   allBucketMeta: Map<string, BucketMeta> = new Map(),
   preservedSheets: PreservedSheet[] = [],
   modifyDates = true,
-  summaryExtraColumns: string[] = []
+  summaryExtraColumns: string[] = [],
+  skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): Promise<string> {
   let resolvedDir = path.dirname(filePath)
   try {
@@ -1921,7 +2819,13 @@ async function writeStreamingExcelReplace(
     const taken = new Set<string>()
     taken.add('summary')
 
-    const buckets = listOutputBuckets(connections, allChunkFiles, queryNames, allBucketMeta)
+    const buckets = listOutputBuckets(
+      connections,
+      allChunkFiles,
+      queryNames,
+      allBucketMeta,
+      skipFailedConnectionIds
+    )
     // Reserve preserved-sheet names so bucket sheets never collide with them.
     for (const ps of preservedSheets) taken.add(ps.name.toLowerCase())
     for (const bucket of buckets) {
@@ -3665,6 +4569,11 @@ export async function runJob(
           progress.adaptive.output_reason = 'excel destination — streaming workbook'
         }
 
+        const skipFailedConnectionIds = failedConnectionIdsFromProgress(
+          progress,
+          job.skip_failed_connection_sheets === true
+        )
+
         const actualPath =
           job.excel_combine_sheets && !isMultiQuery
             ? await writeStreamingExcelCombined(
@@ -3680,7 +4589,8 @@ export async function runJob(
                 {
                   templatePath: await resolveMachineLocalTemplatePath(job.template_path, job.name),
                   templateMode: job.template_mode
-                }
+                },
+                skipFailedConnectionIds
               )
             : await writeStreamingExcel(
                 destPath,
@@ -3696,7 +4606,8 @@ export async function runJob(
                 isMultiQuery ? (job.sql_query_names ?? []) : [],
                 allBucketMeta,
                 job.modify_dates !== false,
-                job.summary_extra_columns ?? []
+                job.summary_extra_columns ?? [],
+                skipFailedConnectionIds
               )
 
         progress.output_path = actualPath
@@ -3782,7 +4693,8 @@ export async function runJob(
           connections,
           allChunkFiles,
           isMultiQuery ? (job.sql_query_names ?? []) : [],
-          allBucketMeta
+          allBucketMeta,
+          failedConnectionIdsFromProgress(progress, job.skip_failed_connection_sheets === true)
         )
         const googleSheetBuckets: GsheetBucket[] = buckets.map((bucket) => ({
           label: bucket.label,

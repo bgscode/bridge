@@ -63,6 +63,7 @@ const schema = z
     summary_extra_columns_scope: z.enum(['summary_only', 'summary_and_combined']),
     // Combine all connections into one sheet (single-query Excel only)
     excel_combine_sheets: z.boolean(),
+    skip_failed_connection_sheets: z.boolean(),
     // Action destination config
     action_file_path: z.string().optional().nullable(),
     action_file_name: z.string().optional().nullable(),
@@ -121,6 +122,7 @@ const DEFAULT_FORM_VALUES: JobFormValues = {
   summary_extra_columns: null,
   summary_extra_columns_scope: 'summary_only',
   excel_combine_sheets: false,
+  skip_failed_connection_sheets: false,
   action_file_path: '',
   action_file_name: '',
   action_sheet_name: '',
@@ -553,6 +555,44 @@ function SummaryExtraColumnsField({
   )
 }
 
+function SkipFailedSheetsField({
+  enabled,
+  onToggle
+}: {
+  enabled: boolean
+  onToggle: () => void
+}): JSX.Element {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-dashed px-3 py-2">
+      <div>
+        <p className="text-xs font-medium">Skip failed connection sheets</p>
+        <p className="text-xs text-muted-foreground">
+          When a connection fails (timeout, offline, query error), leave its existing sheet
+          unchanged and only record the failure on the Summary sheet. Off by default.
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        onClick={onToggle}
+        className={cn(
+          'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent',
+          'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+          enabled ? 'bg-primary' : 'bg-input'
+        )}
+      >
+        <span
+          className={cn(
+            'pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform',
+            enabled ? 'translate-x-4' : 'translate-x-0'
+          )}
+        />
+      </button>
+    </div>
+  )
+}
+
 export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormProps): JSX.Element {
   const { connections } = useConnections()
   const { groups } = useGroups()
@@ -601,6 +641,8 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
     (useWatch({ control, name: 'summary_extra_columns_scope' }) as SummaryExtraColumnsScope) ??
     'summary_only'
   const excelCombineSheets = useWatch({ control, name: 'excel_combine_sheets' }) ?? false
+  const skipFailedConnectionSheets =
+    useWatch({ control, name: 'skip_failed_connection_sheets' }) ?? false
   const operation = useWatch({ control, name: 'operation' })
   const actionTargetTable = useWatch({ control, name: 'action_target_table' })
   const actionMode = useWatch({ control, name: 'action_mode' })
@@ -835,6 +877,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         summary_extra_columns: data?.summary_extra_columns ?? null,
         summary_extra_columns_scope: data?.summary_extra_columns_scope ?? 'summary_only',
         excel_combine_sheets: data?.excel_combine_sheets ?? false,
+        skip_failed_connection_sheets: data?.skip_failed_connection_sheets ?? false,
         action_file_path,
         action_file_name,
         action_sheet_name,
@@ -1104,6 +1147,10 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
         !values.is_multi
           ? (values.excel_combine_sheets ?? false)
+          : false,
+      skip_failed_connection_sheets:
+        values.destination_type === 'excel' || values.destination_type === 'google_sheets'
+          ? (values.skip_failed_connection_sheets ?? false)
           : false
     } as JobFormValues)
     if (mode === 'create') {
@@ -2202,6 +2249,17 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                             setValue('summary_extra_columns_scope', scope, { shouldDirty: true })
                           }
                         />
+
+                        <SkipFailedSheetsField
+                          enabled={skipFailedConnectionSheets}
+                          onToggle={() =>
+                            setValue(
+                              'skip_failed_connection_sheets',
+                              !skipFailedConnectionSheets,
+                              { shouldDirty: true }
+                            )
+                          }
+                        />
                       </>
                     )}
 
@@ -2298,6 +2356,17 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                             </button>
                           </div>
                         )}
+
+                        <SkipFailedSheetsField
+                          enabled={skipFailedConnectionSheets}
+                          onToggle={() =>
+                            setValue(
+                              'skip_failed_connection_sheets',
+                              !skipFailedConnectionSheets,
+                              { shouldDirty: true }
+                            )
+                          }
+                        />
                       </div>
                     )}
 
