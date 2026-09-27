@@ -1,6 +1,6 @@
 import { JSX, useEffect, useState } from 'react'
 import type { RowSelectionState } from '@tanstack/react-table'
-import { Database, Download, KeyRound, Plus, Trash2, Wifi } from 'lucide-react'
+import { Database, Download, KeyRound, Link2, Plus, Trash2, Wifi } from 'lucide-react'
 import ExcelJS from 'exceljs'
 import Papa from 'papaparse'
 
@@ -13,6 +13,7 @@ import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { RowActionsMenu } from '@/components/ui/row-actions-menu'
 import { Separator } from '@/components/ui/separator'
 import { ConnectionForm, type ConnectionFormValues } from './components/form'
+import { AssignJobsDialog } from './components/assign-jobs-dialog'
 import { BulkCredentialsDialog } from './components/bulk-credentials-dialog'
 import { ConnectionRow } from '@shared/index'
 import { toast } from 'sonner'
@@ -49,6 +50,7 @@ export default function ConnectionPage(): JSX.Element {
   const [deleteTarget, setDeleteTarget] = useState<ConnectionRow | null>(null)
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
   const [bulkCredsOpen, setBulkCredsOpen] = useState(false)
+  const [assignTarget, setAssignTarget] = useState<ConnectionRow | null>(null)
 
   // ── Test Progress Listener ────────────────────────────────────────────────
 
@@ -521,15 +523,26 @@ export default function ConnectionPage(): JSX.Element {
             onDuplicate={isAdmin ? () => handleDuplicate(row.original) : undefined}
             onDelete={isAdmin ? () => setDeleteTarget(row.original) : undefined}
             extraItems={
-              <DropdownMenuItem
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleTestOne(row.original.id)
-                }}
-              >
-                <Wifi className="size-4" />
-                Test Connection
-              </DropdownMenuItem>
+              <>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setAssignTarget(row.original)
+                  }}
+                >
+                  <Link2 className="size-4" />
+                  Assign to jobs
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleTestOne(row.original.id)
+                  }}
+                >
+                  <Wifi className="size-4" />
+                  Test Connection
+                </DropdownMenuItem>
+              </>
             }
           />
         </div>
@@ -707,6 +720,14 @@ export default function ConnectionPage(): JSX.Element {
       />
 
       {/* Bulk Update Credentials Dialog */}
+      <AssignJobsDialog
+        connection={assignTarget}
+        open={assignTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setAssignTarget(null)
+        }}
+      />
+
       <BulkCredentialsDialog
         open={bulkCredsOpen}
         onOpenChange={setBulkCredsOpen}
