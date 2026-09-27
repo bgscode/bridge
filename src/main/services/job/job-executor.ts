@@ -36,6 +36,7 @@ import {
   labelForSummaryExtraColumn
 } from './summary-extra-columns'
 import {
+  listXlsxSheetNames,
   rewriteXlsxPreservingOtherSheets,
   type OpenXmlSheetSpec
 } from './xlsx-openxml-stream'
@@ -76,17 +77,40 @@ const jobRetries = new Map<number, Map<number, number>>()
 interface JobAbortHandle {
   requests: Set<mssql.Request>
   pools: Set<mssql.ConnectionPool>
+  byConnection: Map<number, { requests: Set<mssql.Request>; pools: Set<mssql.ConnectionPool> }>
 }
 const jobAbortHandles = new Map<number, JobAbortHandle>()
+const cancelledConnectionIds = new Map<number, Set<number>>()
 
 function registerJobAbortHandle(jobId: number): JobAbortHandle {
-  const handle: JobAbortHandle = { requests: new Set(), pools: new Set() }
+  const handle: JobAbortHandle = {
+    requests: new Set(),
+    pools: new Set(),
+    byConnection: new Map()
+  }
   jobAbortHandles.set(jobId, handle)
   return handle
 }
 
 function clearJobAbortHandle(jobId: number): void {
   jobAbortHandles.delete(jobId)
+  cancelledConnectionIds.delete(jobId)
+}
+
+function connectionAbortBucket(
+  handle: JobAbortHandle,
+  connectionId: number
+): { requests: Set<mssql.Request>; pools: Set<mssql.ConnectionPool> } {
+  let bucket = handle.byConnection.get(connectionId)
+  if (!bucket) {
+    bucket = { requests: new Set(), pools: new Set() }
+    handle.byConnection.set(connectionId, bucket)
+  }
+  return bucket
+}
+
+export function isConnectionCancelled(jobId: number, connectionId: number): boolean {
+  return cancelledConnectionIds.get(jobId)?.has(connectionId) === true
 }
 
 export function getRunningJobs(): JobProgress[] {
@@ -125,6 +149,43 @@ export function cancelJob(jobId: number): boolean {
   const live = runningJobs.get(jobId)
   if (live) {
     live.error = live.error ?? 'Job cancelled by user — finishing output…'
+  }
+  return true
+}
+
+/** Stop one connection. The rest of the job keeps running. */
+export function cancelConnection(jobId: number, connectionId: number): boolean {
+  if (!runningJobs.has(jobId) || cancelledJobs.has(jobId)) return false
+  let skipped = cancelledConnectionIds.get(jobId)
+  if (!skipped) {
+    skipped = new Set()
+    cancelledConnectionIds.set(jobId, skipped)
+  }
+  skipped.add(connectionId)
+
+  const live = runningJobs.get(jobId)
+  const cp = live?.connections.find((c) => c.connection_id === connectionId)
+  if (cp && cp.status !== 'done' && cp.status !== 'error') {
+    cp.status = 'pending'
+    cp.error = 'Skipped'
+    cp.rows = 0
+    cp.finished_at = new Date().toISOString()
+  }
+
+  const bucket = jobAbortHandles.get(jobId)?.byConnection.get(connectionId)
+  if (bucket) {
+    for (const req of bucket.requests) {
+      try {
+        req.cancel()
+      } catch {
+        // best-effort
+      }
+    }
+    bucket.requests.clear()
+    for (const pool of bucket.pools) {
+      pool.close().catch(() => {})
+    }
+    bucket.pools.clear()
   }
   return true
 }
@@ -607,7 +668,10 @@ async function executeStreamingForConnection(
       )
     })
     pool = connected.pool
-    hooks?.abortHandle?.pools.add(pool)
+    if (hooks?.abortHandle && pool) {
+      hooks.abortHandle.pools.add(pool)
+      connectionAbortBucket(hooks.abortHandle, conn.id).pools.add(pool)
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Connection failed'
     if (message === '__CANCELLED__' || hooks?.isCancelled?.()) {
@@ -637,7 +701,10 @@ async function executeStreamingForConnection(
       // Use streaming request for large result sets
       const request = new mssql.Request(pool)
       request.stream = true
-      hooks?.abortHandle?.requests.add(request)
+      if (hooks?.abortHandle) {
+        hooks.abortHandle.requests.add(request)
+        connectionAbortBucket(hooks.abortHandle, conn.id).requests.add(request)
+      }
       // In streaming mode the returned promise resolves once 'done' fires; we
       // rely on the event listeners below. Swallow here so an early rejection
       // doesn't leak as an unhandledRejection.
@@ -745,6 +812,7 @@ async function executeStreamingForConnection(
         })
       } finally {
         hooks?.abortHandle?.requests.delete(request)
+        hooks?.abortHandle?.byConnection.get(conn.id)?.requests.delete(request)
       }
     }
 
@@ -790,6 +858,7 @@ async function executeStreamingForConnection(
   } finally {
     if (pool) {
       hooks?.abortHandle?.pools.delete(pool)
+      hooks?.abortHandle?.byConnection.get(conn.id)?.pools.delete(pool)
       pool.close().catch(() => {})
     }
   }
@@ -1027,30 +1096,68 @@ function failedConnectionIdsFromProgress(
   return ids
 }
 
+/**
+ * Names already in the destination workbook.
+ * `null` means the file exists but could not be read — keep failed sheets untouched.
+ * An empty set means there is no workbook yet, so a failed connection still gets a sheet.
+ */
+async function existingWorkbookSheetNames(filePath: string): Promise<Set<string> | null> {
+  if (!filePath || !fs.existsSync(filePath)) return new Set()
+  try {
+    const names = await listXlsxSheetNames(filePath)
+    if (!names) return null
+    const set = new Set<string>()
+    for (const name of names) {
+      set.add(name.trim().toLowerCase())
+      set.add(sanitizeSheetName(name).toLowerCase())
+    }
+    return set
+  } catch {
+    return null
+  }
+}
+
+function failedSheetAlreadyExists(
+  existingSheetNames: ReadonlySet<string> | null | undefined,
+  label: string
+): boolean {
+  // Caller didn't pass names: keep the old "skip every failed connection" behavior.
+  if (existingSheetNames === undefined) return true
+  // Unreadable workbook: don't replace a sheet we can't see.
+  if (existingSheetNames === null) return true
+  const raw = label.trim().toLowerCase()
+  const safe = sanitizeSheetName(label).toLowerCase()
+  return existingSheetNames.has(raw) || existingSheetNames.has(safe)
+}
+
 function listOutputBuckets(
   connections: ConnectionRow[],
   allChunkFiles: Map<string, string[]>,
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
-  skipFailedConnectionIds: ReadonlySet<number> = new Set()
+  skipFailedConnectionIds: ReadonlySet<number> = new Set(),
+  existingSheetNames?: ReadonlySet<string> | null
 ): OutputBucket[] {
   const connById = new Map(connections.map((c) => [c.id, c]))
   const buckets: OutputBucket[] = []
   const seenTags = new Set<string>()
   const skipFailed = (connId: number): boolean => skipFailedConnectionIds.has(connId)
+  const leaveSheet = (connId: number, label: string): boolean =>
+    skipFailed(connId) && failedSheetAlreadyExists(existingSheetNames, label)
   for (const [tag, chunkFiles] of allChunkFiles) {
     if (!chunkFiles || chunkFiles.length === 0) continue
     const { connId, queryIdx } = parseChunkTag(tag)
-    if (skipFailed(connId)) continue
-    seenTags.add(tag)
     const connection = connById.get(connId)
+    const label = chunkSheetLabel(connection, queryIdx, queryNames)
+    if (leaveSheet(connId, label)) continue
+    seenTags.add(tag)
     const meta = allBucketMeta.get(tag)
     buckets.push({
       tag,
       connection,
       queryIdx,
       chunkFiles,
-      label: chunkSheetLabel(connection, queryIdx, queryNames),
+      label,
       columns: meta?.columns ?? [],
       error: meta?.error ?? null,
       rows: meta?.rows ?? 0
@@ -1064,15 +1171,16 @@ function listOutputBuckets(
     if (seenTags.has(tag)) continue
     if (!meta.error) continue
     const { connId, queryIdx } = parseChunkTag(tag)
-    if (skipFailed(connId)) continue
-    seenTags.add(tag)
     const connection = connById.get(connId)
+    const label = chunkSheetLabel(connection, queryIdx, queryNames)
+    if (leaveSheet(connId, label)) continue
+    seenTags.add(tag)
     buckets.push({
       tag,
       connection,
       queryIdx,
       chunkFiles: [],
-      label: chunkSheetLabel(connection, queryIdx, queryNames),
+      label,
       columns: meta.columns,
       error: meta.error,
       rows: meta.rows
@@ -1090,13 +1198,13 @@ function listOutputBuckets(
       Array.from(allChunkFiles.keys()).some((k) => parseChunkTag(k).queryIdx !== null)
 
     for (const conn of connections) {
-      if (skipFailed(conn.id)) continue
       if (isMultiQ) {
         // Multi-query: emit one empty bucket per query index that is missing.
         const queryCount = Math.max(1, queryNames.length)
         for (let qi = 0; qi < queryCount; qi++) {
           const qTag = chunkTagFor(conn.id, qi)
-          if (!seenTags.has(qTag)) {
+          const qLabel = chunkSheetLabel(conn, qi, queryNames)
+          if (!seenTags.has(qTag) && !leaveSheet(conn.id, qLabel)) {
             seenTags.add(qTag)
             const meta = allBucketMeta.get(qTag)
             buckets.push({
@@ -1104,7 +1212,7 @@ function listOutputBuckets(
               connection: conn,
               queryIdx: qi,
               chunkFiles: [],
-              label: chunkSheetLabel(conn, qi, queryNames),
+              label: qLabel,
               columns: meta?.columns ?? [],
               error: meta?.error ?? null,
               rows: meta?.rows ?? 0
@@ -1118,13 +1226,14 @@ function listOutputBuckets(
           const p = parseChunkTag(k)
           return p.connId === conn.id
         })
-        if (!alreadyHasAny && !seenTags.has(emptyTag)) {
+        const emptyLabel = chunkSheetLabel(conn, null)
+        if (!alreadyHasAny && !seenTags.has(emptyTag) && !leaveSheet(conn.id, emptyLabel)) {
           buckets.push({
             tag: emptyTag,
             connection: conn,
             queryIdx: null,
             chunkFiles: [],
-            label: chunkSheetLabel(conn, null),
+            label: emptyLabel,
             columns: [],
             error: null,
             rows: 0
@@ -1289,7 +1398,8 @@ async function writeInPlaceExcelReplace(
     allChunkFiles,
     queryNames,
     allBucketMeta,
-    skipFailedConnectionIds
+    skipFailedConnectionIds,
+    await existingWorkbookSheetNames(filePath)
   )
   const estimatedRows =
     progress.total_rows > 0
@@ -1704,7 +1814,8 @@ async function writeOpenXmlExcelReplace(
     allChunkFiles,
     queryNames,
     allBucketMeta,
-    skipFailedConnectionIds
+    skipFailedConnectionIds,
+    await existingWorkbookSheetNames(filePath)
   )
   const patterns = bucketSheetNamePatterns(buckets)
   const taken = new Set<string>(['summary'])
@@ -1738,7 +1849,12 @@ async function writeOpenXmlExcelCombined(
   allChunkFiles: Map<string, string[]>,
   summaryExtraColumns: string[] = [],
   summaryExtraColumnsScope: 'summary_only' | 'summary_and_combined' = 'summary_only',
-  modifyDates = true
+  modifyDates = true,
+  options?: {
+    /** Also rewrite per-connection bucket sheets. Small jobs do this today via ExcelJS. */
+    includeBucketSheets?: boolean
+    skipFailedConnectionIds?: ReadonlySet<number>
+  }
 ): Promise<string> {
   const threshold = resolveSheetRowThreshold()
   const taken = new Set<string>(['summary'])
@@ -1807,9 +1923,6 @@ async function writeOpenXmlExcelCombined(
     }
   })
 
-  // Existing template: only rewrite Data (+overflow parts) and Summary.
-  // Do NOT invent per-connection sheets — those would be brand-new tabs the
-  // user never had in their uploaded workbook.
   const summarySpec = buildOpenXmlSummarySheetSpec(
     jobName,
     progress,
@@ -1819,6 +1932,21 @@ async function writeOpenXmlExcelCombined(
     summaryExtraColumns
   )
 
+  // Large jobs rewrite only Data + Summary so we don't duplicate millions of
+  // rows into per-connection tabs. Small jobs also refresh bucket sheets,
+  // matching the previous in-memory ExcelJS replace.
+  const skipFailed = options?.skipFailedConnectionIds ?? new Set<number>()
+  const existingNames = options?.includeBucketSheets
+    ? await existingWorkbookSheetNames(filePath)
+    : undefined
+  const buckets = options?.includeBucketSheets
+    ? listOutputBuckets(connections, allChunkFiles, [], new Map(), skipFailed, existingNames)
+    : []
+  const bucketPatterns = bucketSheetNamePatterns(buckets)
+  const bucketSpecs = options?.includeBucketSheets
+    ? buildOpenXmlBucketSheetSpecs(buckets, modifyDates, taken)
+    : []
+
   return rewriteXlsxPreservingOtherSheets({
     sourcePath: filePath,
     destPath: filePath,
@@ -1827,9 +1955,10 @@ async function writeOpenXmlExcelCombined(
       if (lc === 'summary') return true
       if (lc === 'data') return true
       if (lc.startsWith('data') && /_part\d+$/.test(lc)) return true
+      if (options?.includeBucketSheets && isBucketSheetName(name, bucketPatterns)) return true
       return false
     },
-    sheets: [...dataSpecs, summarySpec]
+    sheets: [...dataSpecs, ...bucketSpecs, summarySpec]
   })
 }
 
@@ -1883,7 +2012,8 @@ async function writeStreamingExcelCombinedStream(
       allChunkFiles,
       [],
       new Map(),
-      skipFailedConnectionIds
+      skipFailedConnectionIds,
+      await existingWorkbookSheetNames(filePath)
     )
 
     const includeCombinedExtraColumns =
@@ -2223,28 +2353,40 @@ async function writeStreamingExcelCombined(
           new Map(),
           skipFailedConnectionIds
         ).reduce((sum, b) => sum + (b.rows || 0), 0)
-  if (estimatedCombinedRows > IN_MEMORY_EXCEL_ROW_LIMIT) {
-    // Prefer OpenXML surgical rewrite when a destination/template already
-    // exists — keeps formula/chart/pivot sheets byte-exact while streaming
-    // only Data (+parts) / bucket / Summary sheet XML.
-    if (fs.existsSync(filePath)) {
-      try {
-        return await writeOpenXmlExcelCombined(
-          filePath,
-          jobName,
-          progress,
-          connections,
-          allChunkFiles,
-          summaryExtraColumns,
-          summaryExtraColumnsScope,
-          modifyDates
-        )
-      } catch (err) {
-        progress.error =
-          progress.error ??
-          `OpenXML template preserve failed (${err instanceof Error ? err.message : String(err)}) — rebuilt workbook`
+  // Existing workbook: never ExcelJS.readFile it. OpenXML copies every
+  // untouched sheet (Report, formulas, charts, pivots) and rewrites only
+  // the sheets this job owns. A 150 MB xlsx can expand to ~4 GB in V8.
+  if (fs.existsSync(filePath)) {
+    try {
+      return await writeOpenXmlExcelCombined(
+        filePath,
+        jobName,
+        progress,
+        connections,
+        allChunkFiles,
+        summaryExtraColumns,
+        summaryExtraColumnsScope,
+        modifyDates,
+        {
+          includeBucketSheets: estimatedCombinedRows <= IN_MEMORY_EXCEL_ROW_LIMIT,
+          skipFailedConnectionIds
+        }
+      )
+    } catch (err) {
+      progress.error =
+        progress.error ??
+        `OpenXML template preserve failed (${err instanceof Error ? err.message : String(err)}) — rebuilt workbook`
+      if (estimatedCombinedRows > IN_MEMORY_EXCEL_ROW_LIMIT) {
+        try {
+          await fs.promises.unlink(filePath)
+        } catch {
+          // streaming writer truncates on create
+        }
       }
     }
+  }
+
+  if (estimatedCombinedRows > IN_MEMORY_EXCEL_ROW_LIMIT) {
     return writeStreamingExcelCombinedStream(
       filePath,
       jobName,
@@ -2271,7 +2413,8 @@ async function writeStreamingExcelCombined(
     allChunkFiles,
     [],
     new Map(),
-    skipFailedConnectionIds
+    skipFailedConnectionIds,
+    await existingWorkbookSheetNames(filePath)
   )
   const bucketPatterns = bucketSheetNamePatterns(buckets)
 
@@ -2507,10 +2650,9 @@ async function writeStreamingExcel(
           ).reduce((sum, b) => sum + (b.rows || 0), 0)
     const useInPlace = estimatedRows <= IN_MEMORY_EXCEL_ROW_LIMIT
 
-    // Large datasets into an existing workbook/template: OpenXML stream-rewrite
-    // of owned sheets only — formulas/charts/pivots on other sheets stay untouched
-    // and RAM stays flat (no ExcelJS Workbook of millions of rows).
-    if (!useInPlace && fs.existsSync(filePath)) {
+    // Existing file: rewrite owned sheets with OpenXML. Other sheets stay
+    // byte-for-byte. ExcelJS.readFile is what blows the ~4 GB heap.
+    if (fs.existsSync(filePath)) {
       try {
         return await writeOpenXmlExcelReplace(
           filePath,
@@ -2536,24 +2678,9 @@ async function writeStreamingExcel(
       }
     }
 
-    if (useInPlace) {
-      // Replace mode: keep ALL user-added sheets (Reports, formula tabs,
-      // charts, pivots, named ranges …) intact. We only rewrite the sheets
-      // this job owns — the per-connection bucket sheets and the Summary.
-      //
-      // Strategy (single, uniform path):
-      //   • The in-place helper handles BOTH cases:
-      //       1. File exists → load it with ExcelJS, remove only bucket +
-      //          Summary sheets, write the new bucket + Summary sheets back
-      //          into the SAME workbook, save. Every other sheet round-trips
-      //          bit-exact (formulas, conditional formatting, merged cells,
-      //          charts, named ranges, …).
-      //       2. File does NOT exist → start with a fresh workbook, add the
-      //          bucket sheets + Summary, save at `filePath`. There are no
-      //          user sheets to preserve in this case, so nothing is lost.
-      //   • Only when an EXISTING workbook can't be opened (corrupt / locked
-      //     / OOM) does the helper return `null` and we fall back to the
-      //     streaming writer, guaranteeing the run still produces output.
+    if (useInPlace && !fs.existsSync(filePath)) {
+      // New file only. An existing workbook is rewritten above via OpenXML
+      // so we never ExcelJS.readFile a destination that already has sheets.
       const written = await writeInPlaceExcelReplace(
         filePath,
         jobName,
@@ -2666,7 +2793,8 @@ async function writeStreamingExcel(
     allChunkFiles,
     queryNames,
     allBucketMeta,
-    skipFailedConnectionIds
+    skipFailedConnectionIds,
+    await existingWorkbookSheetNames(filePath)
   )
   for (const bucket of buckets) {
     // Cancel does NOT abort the writer mid-flight (see writeStreamingExcelReplace).
@@ -2824,7 +2952,8 @@ async function writeStreamingExcelReplace(
       allChunkFiles,
       queryNames,
       allBucketMeta,
-      skipFailedConnectionIds
+      skipFailedConnectionIds,
+      await existingWorkbookSheetNames(filePath)
     )
     // Reserve preserved-sheet names so bucket sheets never collide with them.
     for (const ps of preservedSheets) taken.add(ps.name.toLowerCase())
@@ -4306,7 +4435,7 @@ export async function runJob(
                 {
                   recordRows: (n) => brain.recordRows(n),
                   isBackpressured,
-                  isCancelled,
+                  isCancelled: () => isCancelled() || isConnectionCancelled(jobId, conn.id),
                   abortHandle,
                   writeRows: directCsvContext
                     ? async (rows) => {
@@ -4387,7 +4516,9 @@ export async function runJob(
         // If we exited the plan because of a cancellation (no error and the
         // executor returned `cancelled: true`), keep the connection 'pending'
         // so it shows up in the retry list rather than counting as success.
-        const wasCancelled = isCancelled() && !aggregateError && aggregateRows === 0
+        const connSkipped = isConnectionCancelled(jobId, conn.id)
+        const wasCancelled =
+          (isCancelled() || connSkipped) && !aggregateError && (connSkipped || aggregateRows === 0)
         if (!aggregateError && !wasCancelled) {
           connProgress.status = 'done'
           connProgress.rows = aggregateRows
@@ -4448,11 +4579,14 @@ export async function runJob(
           }
         } else if (wasCancelled) {
           connProgress.status = 'pending'
-          connProgress.error = null
+          connProgress.error = connSkipped ? 'Skipped' : null
+          connProgress.rows = connSkipped ? 0 : connProgress.rows
           connProgress.finished_at = new Date().toISOString()
         }
 
-        if (directCsvContext) {
+        if (directCsvContext && connSkipped) {
+          await resetDirectCsvConnection(directCsvContext, conn.id)
+        } else if (directCsvContext) {
           if (result.error) {
             // For single-query direct-CSV mode there is exactly one bucket meta entry.
             const lastMeta = aggregateBucketMeta[aggregateBucketMeta.length - 1]
@@ -4470,21 +4604,23 @@ export async function runJob(
           }
         }
 
-        progress.total_rows += result.totalRows
-        if (result.error) {
-          progress.failed_connections++
-        }
-        for (const entry of aggregateChunkFiles) {
-          if (entry.files.length > 0) {
-            allChunkFiles.set(entry.tag, entry.files)
+        if (!connSkipped) {
+          progress.total_rows += result.totalRows
+          if (result.error) {
+            progress.failed_connections++
           }
-        }
-        for (const entry of aggregateBucketMeta) {
-          allBucketMeta.set(entry.tag, {
-            columns: entry.columns,
-            error: entry.error,
-            rows: entry.rows
-          })
+          for (const entry of aggregateChunkFiles) {
+            if (entry.files.length > 0) {
+              allChunkFiles.set(entry.tag, entry.files)
+            }
+          }
+          for (const entry of aggregateBucketMeta) {
+            allBucketMeta.set(entry.tag, {
+              columns: entry.columns,
+              error: entry.error,
+              rows: entry.rows
+            })
+          }
         }
         // Cancelled-mid-flight connections stay 'pending' and are NOT counted
         // as completed — that way the floating progress bar doesn't claim

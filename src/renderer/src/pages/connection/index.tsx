@@ -382,6 +382,7 @@ export default function ConnectionPage(): JSX.Element {
     {
       accessorKey: 'group_id',
       header: 'Group',
+      accessorFn: (row) => groups.find((g) => g.id === row.group_id)?.name ?? '',
       cell: ({ row }) =>
         row.original.group_id != null ? (
           <Badge variant="outline" className="text-xs font-normal">
@@ -391,7 +392,12 @@ export default function ConnectionPage(): JSX.Element {
         ) : (
           <span className="text-muted-foreground">—</span>
         ),
-      meta: { filterType: 'text', resizable: true }
+      meta: {
+        filterType: 'select',
+        filterOptions: groups.map((g) => ({ label: g.name, value: String(g.id) })),
+        getFilterValue: (row) => (row.group_id == null ? '' : String(row.group_id)),
+        resizable: true
+      }
     },
     {
       accessorKey: 'static_ip',
@@ -418,6 +424,7 @@ export default function ConnectionPage(): JSX.Element {
     {
       accessorKey: 'fiscal_year_id',
       header: 'Financial Year',
+      accessorFn: (row) => fiscalYears.find((f) => f.id === row.fiscal_year_id)?.name ?? '',
       cell: ({ row }) =>
         row.original.fiscal_year_id != null ? (
           <span className="text-sm">
@@ -427,11 +434,20 @@ export default function ConnectionPage(): JSX.Element {
         ) : (
           <span className="text-muted-foreground">—</span>
         ),
-      meta: { filterType: 'text', resizable: true }
+      meta: {
+        filterType: 'select',
+        filterOptions: fiscalYears.map((f) => ({ label: f.name, value: String(f.id) })),
+        getFilterValue: (row) => (row.fiscal_year_id == null ? '' : String(row.fiscal_year_id)),
+        resizable: true
+      }
     },
     {
       accessorKey: 'store_id',
       header: 'Store',
+      accessorFn: (row) => {
+        const store = stores.find((s) => s.id === row.store_id)
+        return store ? `${store.name} ${store.code}` : ''
+      },
       cell: ({ row }) =>
         row.original.store_id != null ? (
           <span className="text-sm">
@@ -441,7 +457,15 @@ export default function ConnectionPage(): JSX.Element {
         ) : (
           <span className="text-muted-foreground">—</span>
         ),
-      meta: { filterType: 'text', resizable: true }
+      meta: {
+        filterType: 'select',
+        filterOptions: stores.map((s) => ({
+          label: s.code ? `${s.name} (${s.code})` : s.name,
+          value: String(s.id)
+        })),
+        getFilterValue: (row) => (row.store_id == null ? '' : String(row.store_id)),
+        resizable: true
+      }
     },
     {
       accessorKey: 'status',

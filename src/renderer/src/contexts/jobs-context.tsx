@@ -141,6 +141,10 @@ export function JobsProvider({ children }: { children: ReactNode }): ReactNode {
     toast.info('Cancelling job…')
   }, [])
 
+  const cancelConnection = useCallback((jobId: number, connectionId: number): void => {
+    window.api.jobs.cancelConnection(jobId, connectionId)
+  }, [])
+
   const dismissJob = useCallback((id: number): void => {
     setRunningJobs((prev) => prev.filter((p) => p.job_id !== id))
   }, [])
@@ -158,6 +162,7 @@ export function JobsProvider({ children }: { children: ReactNode }): ReactNode {
       bulkCreate,
       run,
       cancel,
+      cancelConnection,
       reload
     }),
     [
@@ -170,6 +175,7 @@ export function JobsProvider({ children }: { children: ReactNode }): ReactNode {
       bulkCreate,
       run,
       cancel,
+      cancelConnection,
       reload
     ]
   )

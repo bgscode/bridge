@@ -99,8 +99,9 @@ function ConnStatusIcon({ status }: { status: JobConnectionProgress['status'] })
   }
 }
 
-function connStatusLabel(status: JobConnectionProgress['status']): string {
-  switch (status) {
+function connStatusLabel(c: JobConnectionProgress): string {
+  if (c.status === 'pending' && c.error === 'Skipped') return 'Skipped'
+  switch (c.status) {
     case 'pending':
       return 'Waiting'
     case 'connecting':
@@ -123,7 +124,7 @@ function JobCard({
   progress: JobProgress
   onDismiss: () => void
 }): JSX.Element {
-  const { cancel, jobs, run } = useJobs()
+  const { cancel, cancelConnection, jobs, run } = useJobs()
   const [expanded, setExpanded] = useState(false)
   const [combining, setCombining] = useState(false)
   const [combinedPath, setCombinedPath] = useState<string | null>(null)
@@ -423,8 +424,23 @@ function JobCard({
                       c.status === 'pending' && 'text-muted-foreground'
                     )}
                   >
-                    {connStatusLabel(c.status)}
+                    {connStatusLabel(c)}
                   </span>
+                  {isRunning &&
+                    c.error !== 'Skipped' &&
+                    (c.status === 'pending' ||
+                      c.status === 'connecting' ||
+                      c.status === 'querying') && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-5 shrink-0 text-destructive hover:text-destructive"
+                        title={`Stop "${c.connection_name}"`}
+                        onClick={() => cancelConnection(progress.job_id, c.connection_id)}
+                      >
+                        <Square className="size-3" />
+                      </Button>
+                    )}
                   {c.rows > 0 && (
                     <Badge variant="secondary" className="text-[10px] px-1 py-0 h-4 shrink-0">
                       {c.rows} rows

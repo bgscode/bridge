@@ -51,6 +51,7 @@ appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: true
 buildDependenciesFromSource: false
+afterPack: scripts/after-pack.cjs
 publish:
   provider: generic
   url: https://example.com/auto-updates

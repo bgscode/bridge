@@ -567,8 +567,9 @@ function SkipFailedSheetsField({
       <div>
         <p className="text-xs font-medium">Skip failed connection sheets</p>
         <p className="text-xs text-muted-foreground">
-          When a connection fails (timeout, offline, query error), leave its existing sheet
-          unchanged and only record the failure on the Summary sheet. Off by default.
+          When a connection fails, leave its sheet unchanged if that sheet is already in the
+          file. If the sheet is not there yet, still create it and record the failure on the
+          Summary sheet. Off by default.
         </p>
       </div>
       <button

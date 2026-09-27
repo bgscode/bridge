@@ -1,4 +1,10 @@
-import type { FilterModel, FilterOperator, FilterRule, FilterType } from '../types'
+import type {
+  DataGridColumnDef,
+  FilterModel,
+  FilterOperator,
+  FilterRule,
+  FilterType
+} from '../types'
 
 export const FILTER_OPERATORS_BY_TYPE: Record<FilterType, FilterOperator[]> = {
   text: [
@@ -35,45 +41,79 @@ export const FILTER_OPERATOR_LABELS: Record<FilterOperator, string> = {
   isNot: 'Is not'
 }
 
-export function applyFilterModel<TData>(rows: TData[], model: FilterModel): TData[] {
+function columnIdOf<TData>(col: DataGridColumnDef<TData>): string {
+  return col.id ?? ((col as { accessorKey?: string }).accessorKey ?? '')
+}
+
+function resolveFilterValue<TData>(
+  row: TData,
+  columnId: string,
+  columns?: DataGridColumnDef<TData>[]
+): unknown {
+  const col = columns?.find((c) => columnIdOf(c) === columnId)
+  if (col) {
+    if (typeof col.meta?.getFilterValue === 'function') {
+      return col.meta.getFilterValue(row)
+    }
+    if (typeof col.accessorFn === 'function') {
+      return col.accessorFn(row, 0)
+    }
+    const accessorKey = (col as { accessorKey?: string }).accessorKey
+    if (accessorKey) return (row as Record<string, unknown>)[accessorKey]
+  }
+  return (row as Record<string, unknown>)[columnId]
+}
+
+function asSearchText(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  return String(value).trim().toLowerCase()
+}
+
+export function applyFilterModel<TData>(
+  rows: TData[],
+  model: FilterModel,
+  columns?: DataGridColumnDef<TData>[]
+): TData[] {
   if (!model.rules.length) return rows
 
   return rows.filter((row) => {
-    const results = model.rules.map((rule) => applyRule(row, rule))
+    const results = model.rules.map((rule) => applyRule(row, rule, columns))
     return model.logic === 'and' ? results.every(Boolean) : results.some(Boolean)
   })
 }
 
-function applyRule<TData>(row: TData, rule: FilterRule): boolean {
-  const cellValue = (row as Record<string, unknown>)[rule.columnId]
+function applyRule<TData>(
+  row: TData,
+  rule: FilterRule,
+  columns?: DataGridColumnDef<TData>[]
+): boolean {
+  const cellValue = resolveFilterValue(row, rule.columnId, columns)
   const val = rule.value
   const val2 = rule.value2
+  const cellText = asSearchText(cellValue)
+  const query = asSearchText(val)
 
   switch (rule.operator) {
     case 'isEmpty':
-      return cellValue === null || cellValue === undefined || cellValue === ''
+      return cellValue === null || cellValue === undefined || cellText === ''
     case 'isNotEmpty':
-      return cellValue !== null && cellValue !== undefined && cellValue !== ''
+      return cellValue !== null && cellValue !== undefined && cellText !== ''
     case 'contains':
-      return String(cellValue ?? '')
-        .toLowerCase()
-        .includes(String(val ?? '').toLowerCase())
+      if (!query) return true
+      return cellText.includes(query)
     case 'notContains':
-      return !String(cellValue ?? '')
-        .toLowerCase()
-        .includes(String(val ?? '').toLowerCase())
+      if (!query) return true
+      return !cellText.includes(query)
     case 'equals':
-      return String(cellValue ?? '') === String(val ?? '')
+      return cellText === query
     case 'notEquals':
-      return String(cellValue ?? '') !== String(val ?? '')
+      return cellText !== query
     case 'startsWith':
-      return String(cellValue ?? '')
-        .toLowerCase()
-        .startsWith(String(val ?? '').toLowerCase())
+      if (!query) return true
+      return cellText.startsWith(query)
     case 'endsWith':
-      return String(cellValue ?? '')
-        .toLowerCase()
-        .endsWith(String(val ?? '').toLowerCase())
+      if (!query) return true
+      return cellText.endsWith(query)
     case 'gt':
       return Number(cellValue) > Number(val)
     case 'gte':
@@ -85,9 +125,11 @@ function applyRule<TData>(row: TData, rule: FilterRule): boolean {
     case 'between':
       return Number(cellValue) >= Number(val) && Number(cellValue) <= Number(val2 ?? Infinity)
     case 'is':
-      return String(cellValue) === String(val)
+      if (val === '' || val == null) return true
+      return String(cellValue ?? '') === String(val ?? '')
     case 'isNot':
-      return String(cellValue) !== String(val)
+      if (val === '' || val == null) return true
+      return String(cellValue ?? '') !== String(val ?? '')
     default:
       return true
   }
@@ -105,3 +147,4 @@ export function createEmptyFilterRule(columnId: string): FilterRule {
 export function createEmptyFilterModel(): FilterModel {
   return { logic: 'and', rules: [] }
 }
+

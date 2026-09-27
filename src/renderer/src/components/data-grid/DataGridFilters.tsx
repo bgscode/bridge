@@ -10,6 +10,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { SelectBox } from '@/components/select-box'
 import { cn } from '@/lib/utils'
 import type { FilterModel, FilterOperator, FilterRule, FilterType } from './types'
 import {
@@ -190,21 +191,23 @@ export function DataGridFilters<TData>({
                 {/* Value input */}
                 {needsValue &&
                   (filterType === 'select' ? (
-                    <Select
-                      value={String(rule.value ?? '')}
-                      onValueChange={(v) => updateRule(rule.id, { value: v })}
-                    >
-                      <SelectTrigger className="h-7 w-36 text-xs">
-                        <SelectValue placeholder="Select…" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {selectOptions.map((opt) => (
-                          <SelectItem key={opt.value} value={opt.value} className="text-xs">
-                            {opt.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <SelectBox
+                      size="sm"
+                      searchable
+                      clearable
+                      className="w-44"
+                      options={selectOptions.map((opt) => ({
+                        value: opt.value,
+                        label: opt.label
+                      }))}
+                      value={
+                        rule.value === '' || rule.value == null ? null : String(rule.value)
+                      }
+                      onChange={(v) =>
+                        updateRule(rule.id, { value: v == null ? '' : String(v) })
+                      }
+                      placeholder="Search…"
+                    />
                   ) : (
                     <Input
                       value={String(rule.value ?? '')}

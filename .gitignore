@@ -1,5 +1,7 @@
 node_modules
 dist
+build/prebuilds
+dist-local
 out
 .DS_Store
 .eslintcache

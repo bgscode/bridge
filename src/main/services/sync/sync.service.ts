@@ -514,6 +514,15 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
     }
   })
 
+  const localSkipSheetsSnapshot = new Map<string, number>()
+  ;(
+    db.prepare(
+      'SELECT remote_id, skip_failed_connection_sheets FROM jobs WHERE remote_id IS NOT NULL'
+    ).all() as { remote_id: string; skip_failed_connection_sheets: number | null }[]
+  ).forEach((r) => {
+    if (r.remote_id) localSkipSheetsSnapshot.set(r.remote_id, r.skip_failed_connection_sheets ? 1 : 0)
+  })
+
   // Server is master: wipe local state and rebuild from server snapshot.
   // Order matters — jobs → connections → catalog (no FK violations).
   const wipe = db.transaction(() => {
@@ -739,7 +748,12 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
             ? 'summary_and_combined'
             : 'summary_only',
         excel_combine_sheets: r.excelCombineSheets ? 1 : 0,
-        skip_failed_connection_sheets: r.skipFailedConnectionSheets ? 1 : 0,
+        skip_failed_connection_sheets:
+          r.skipFailedConnectionSheets == null
+            ? (localSkipSheetsSnapshot.get(r.id) ?? 0)
+            : r.skipFailedConnectionSheets
+              ? 1
+              : 0,
         remote_id: r.id
       }
       const existing = findJob.get(r.id) as { id: number } | undefined

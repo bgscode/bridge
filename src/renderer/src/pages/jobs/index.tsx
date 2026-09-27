@@ -329,7 +329,15 @@ export default function JobsPage(): JSX.Element {
           <span className={`text-sm ${getTintedMutedTextClass(row.original)}`}>{groupName}</span>
         )
       },
-      meta: { filterType: 'text', resizable: true }
+      meta: {
+        filterType: 'select',
+        filterOptions: [
+          { label: 'Ungrouped', value: 'none' },
+          ...jobGroups.map((g) => ({ label: g.name, value: String(g.id) }))
+        ],
+        getFilterValue: (row) => (row.job_group_id == null ? 'none' : String(row.job_group_id)),
+        resizable: true
+      }
     },
     {
       accessorKey: 'status',

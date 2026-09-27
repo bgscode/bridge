@@ -473,6 +473,21 @@ const migrations: Migration[] = [
         )
       }
     }
+  },
+  {
+    version: 30,
+    fn(db: Database.Database): void {
+      // v28 was reused: some local DBs already recorded version 28 before
+      // skip_failed_connection_sheets existed, so the original v28 never ran.
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('skip_failed_connection_sheets')) {
+        db.exec(
+          'ALTER TABLE jobs ADD COLUMN skip_failed_connection_sheets INTEGER NOT NULL DEFAULT 0'
+        )
+      }
+    }
   }
 ]
 

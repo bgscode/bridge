@@ -51,9 +51,11 @@ export interface FilterModel {
 }
 
 // ─── Column Extension ─────────────────────────────────────────────────────────
-export interface DataGridColumnMeta {
+export interface DataGridColumnMeta<TData = unknown> {
   filterType?: FilterType
   filterOptions?: { label: string; value: string }[] // for 'select' filter
+  /** Override the value used by the filter panel (e.g. show name, store id). */
+  getFilterValue?: (row: TData) => unknown
   pinnable?: boolean
   resizable?: boolean
   reorderable?: boolean
@@ -62,7 +64,7 @@ export interface DataGridColumnMeta {
 }
 
 export type DataGridColumnDef<TData> = ColumnDef<TData, unknown> & {
-  meta?: DataGridColumnMeta
+  meta?: DataGridColumnMeta<TData>
 }
 
 // ─── Sort Model ───────────────────────────────────────────────────────────────

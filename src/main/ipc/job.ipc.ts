@@ -2,7 +2,13 @@ import { ipcMain } from 'electron'
 import { jobRepository } from '../db/repositories/job.repository'
 import { connection as connectionRepo } from '../db/repositories/connection.repository'
 import { CreateJobDto, UpdateJobDto, JobRunOptions, JobRow } from '@shared/index'
-import { runJob, cancelJob, getRunningJobs, isJobRunning } from '../services/job/job-executor'
+import {
+  runJob,
+  cancelJob,
+  cancelConnection,
+  getRunningJobs,
+  isJobRunning
+} from '../services/job/job-executor'
 import { getSchedulerStatus, rescheduleJob } from '../services/job/job-scheduler'
 import { connectUsingBestIp } from '../services/connection/sql-connector'
 import {
@@ -184,6 +190,17 @@ export function registerJobIpc(): void {
     const cancelled = cancelJob(jobId)
     // Push an immediate progress snapshot so the UI flips to "cancelled"
     // without waiting for the executor's throttled emit.
+    if (cancelled) {
+      const live = getRunningJobs().find((p) => p.job_id === jobId)
+      if (live && !event.sender.isDestroyed()) {
+        event.sender.send('jobs:progress', live)
+      }
+    }
+    return cancelled
+  })
+
+  ipcMain.handle('jobs:cancelConnection', (event, jobId: number, connectionId: number) => {
+    const cancelled = cancelConnection(jobId, connectionId)
     if (cancelled) {
       const live = getRunningJobs().find((p) => p.job_id === jobId)
       if (live && !event.sender.isDestroyed()) {

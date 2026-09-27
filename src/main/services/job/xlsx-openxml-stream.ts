@@ -68,6 +68,14 @@ export interface WorkbookSheetRef {
   targetPath: string
 }
 
+/** Sheet names already in an xlsx, or null if the package can't be read. */
+export async function listXlsxSheetNames(filePath: string): Promise<string[] | null> {
+  const workbookXml = await readZipText(filePath, 'xl/workbook.xml')
+  const relsXml = await readZipText(filePath, 'xl/_rels/workbook.xml.rels')
+  if (!workbookXml || !relsXml) return null
+  return parseWorkbookSheets(workbookXml, relsXml).map((s) => s.name)
+}
+
 export function parseWorkbookSheets(
   workbookXml: string,
   relsXml: string

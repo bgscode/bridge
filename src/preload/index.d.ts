@@ -76,6 +76,7 @@ declare global {
         deleteAll: (ids: number[]) => Promise<void>
         run: (id: number, options?: JobRunOptions) => Promise<JobProgress>
         cancel: (id: number) => Promise<boolean>
+        cancelConnection: (jobId: number, connectionId: number) => Promise<boolean>
         isRunning: (id: number) => Promise<boolean>
         getRunning: () => Promise<JobProgress[]>
         schedulerStatus: () => Promise<

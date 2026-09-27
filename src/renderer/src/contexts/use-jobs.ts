@@ -11,6 +11,7 @@ export interface JobsContextValue {
   bulkCreate: (items: CreateJobDto[]) => Promise<JobRow[]>
   run: (id: number, options?: JobRunOptions) => void
   cancel: (id: number) => void
+  cancelConnection: (jobId: number, connectionId: number) => void
   reload: () => void
 }
 

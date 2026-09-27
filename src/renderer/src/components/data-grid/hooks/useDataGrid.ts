@@ -204,7 +204,7 @@ export function useDataGrid<TData>(props: DataGridProps<TData>): UseDataGridRetu
   const filteredData = useMemo<TData[]>(() => {
     if (props.serverSide) return data
     if (!filterModel.rules.length) return data
-    return applyFilterModel(data, filterModel)
+    return applyFilterModel(data, filterModel, columns)
   }, [data, filterModel, props.serverSide])
 
   const table = useReactTable<TData>({

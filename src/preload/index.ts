@@ -56,6 +56,8 @@ const api = {
     deleteAll: (ids: number[]) => ipcRenderer.invoke('jobs:deleteAll', ids),
     run: (id: number, options?: unknown) => ipcRenderer.invoke('jobs:run', id, options),
     cancel: (id: number) => ipcRenderer.invoke('jobs:cancel', id),
+    cancelConnection: (jobId: number, connectionId: number) =>
+      ipcRenderer.invoke('jobs:cancelConnection', jobId, connectionId),
     isRunning: (id: number) => ipcRenderer.invoke('jobs:isRunning', id),
     getRunning: () => ipcRenderer.invoke('jobs:getRunning'),
     schedulerStatus: () => ipcRenderer.invoke('jobs:schedulerStatus'),
