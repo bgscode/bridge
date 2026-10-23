@@ -372,11 +372,11 @@ export default function SettingsPage(): JSX.Element {
             <SettingRow
               label="Sheet & file name source"
               description="What each generated Excel sheet / CSV file is named after. Falls back to the connection name when a linked store is missing."
-              badge="default Connection Name"
+              badge="default Store Code"
               error={errors.excel_sheet_name_source?.message}
             >
               <select
-                value={sheetNameSource ?? 'connection_name'}
+                value={sheetNameSource ?? 'store_code'}
                 onChange={(e) =>
                   setValue(
                     'excel_sheet_name_source',

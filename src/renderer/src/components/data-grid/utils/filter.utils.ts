@@ -55,8 +55,9 @@ function resolveFilterValue<TData>(
     if (typeof col.meta?.getFilterValue === 'function') {
       return col.meta.getFilterValue(row)
     }
-    if (typeof col.accessorFn === 'function') {
-      return col.accessorFn(row, 0)
+    const accessorFn = (col as { accessorFn?: (row: TData, index: number) => unknown }).accessorFn
+    if (typeof accessorFn === 'function') {
+      return accessorFn(row, 0)
     }
     const accessorKey = (col as { accessorKey?: string }).accessorKey
     if (accessorKey) return (row as Record<string, unknown>)[accessorKey]

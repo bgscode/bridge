@@ -488,6 +488,15 @@ const migrations: Migration[] = [
         )
       }
     }
+  },
+  {
+    version: 31,
+    fn(db: Database.Database): void {
+      // Sheet names and summary labels use the store code.
+      db.prepare(
+        'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+      ).run('excel_sheet_name_source', 'store_code')
+    }
   }
 ]
 

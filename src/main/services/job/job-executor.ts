@@ -471,6 +471,18 @@ function resolveConnectionLabel(connection: ConnectionRow | undefined): string {
   return connection.name
 }
 
+/** Summary header for the connection column, matching the sheet-naming preference. */
+function summaryConnectionHeader(): string {
+  const source = settingsRepo.getAll().excel_sheet_name_source
+  return source === 'connection_name' ? 'Connection' : 'Store'
+}
+
+/** Summary-row label for a connection, following the same sheet-naming preference. */
+function summaryConnectionLabel(conn: { connection_id: number; connection_name: string }): string {
+  const row = connectionRepo.findById(conn.connection_id)
+  return row ? resolveConnectionLabel(row) : conn.connection_name
+}
+
 async function readChunkFromFile(filePath: string): Promise<Record<string, unknown>[]> {
   const data = await fs.promises.readFile(filePath, 'utf-8')
   if (!data) return []
@@ -1084,10 +1096,7 @@ interface BucketMeta {
   rows: number
 }
 
-function failedConnectionIdsFromProgress(
-  progress: JobProgress,
-  enabled: boolean
-): Set<number> {
+function failedConnectionIdsFromProgress(progress: JobProgress, enabled: boolean): Set<number> {
   const ids = new Set<number>()
   if (!enabled) return ids
   for (const conn of progress.connections) {
@@ -1606,7 +1615,7 @@ function buildOpenXmlSummarySheetSpec(
 
   const rows: unknown[][] = []
   rows.push([
-    'Connection',
+    summaryConnectionHeader(),
     'Sheet Name',
     ...extraColKeys.map((key) => extraLabels[key] ?? key),
     'Status',
@@ -1657,7 +1666,7 @@ function buildOpenXmlSummarySheetSpec(
     const sheetLabel = connLabelMap.get(conn.connection_id) ?? conn.connection_name
     if (isMultiQuery) {
       rows.push([
-        conn.connection_name,
+        summaryConnectionLabel(conn),
         '',
         ...extraValuesFor(conn.connection_id),
         conn.status,
@@ -1689,7 +1698,7 @@ function buildOpenXmlSummarySheetSpec(
       }
     } else {
       rows.push([
-        conn.connection_name,
+        summaryConnectionLabel(conn),
         sheetLabel,
         ...extraValuesFor(conn.connection_id),
         conn.status,
@@ -2029,9 +2038,7 @@ async function writeStreamingExcelCombinedStream(
     // ── Combined "Data" sheet (all connections) with rollover ──────────────
     const willSplitData = progress.total_rows > threshold
     let dataRollover = 0
-    let dataSheet = workbook.addWorksheet(
-      nextRolloverSheetName('Data', 0, taken, willSplitData)
-    )
+    let dataSheet = workbook.addWorksheet(nextRolloverSheetName('Data', 0, taken, willSplitData))
     let dataHeaders: string[] = []
     let dataHeadersSet = false
     let dataRowsInSheet = 0
@@ -2203,7 +2210,7 @@ async function writeStreamingExcelCombinedStream(
     }
 
     const summaryHeaders = [
-      'Connection',
+      summaryConnectionHeader(),
       'Sheet Name',
       ...extraColKeys.map((key) => extraLabels[key] ?? key),
       'Status',
@@ -2268,7 +2275,7 @@ async function writeStreamingExcelCombinedStream(
       const sheetLabel = connLabelMap.get(conn.connection_id) ?? conn.connection_name
       summary
         .addRow([
-          conn.connection_name,
+          summaryConnectionLabel(conn),
           sheetLabel,
           ...extraValuesFor(conn.connection_id),
           conn.status,
@@ -3096,7 +3103,7 @@ async function writeStreamingExcelReplace(
     }
 
     const summaryHeaders = [
-      'Connection',
+      summaryConnectionHeader(),
       'Sheet Name',
       ...extraColKeys.map((key) => extraLabels[key] ?? key),
       'Status',
@@ -3165,7 +3172,7 @@ async function writeStreamingExcelReplace(
         // Connection-level aggregate row (Sheet Name blank for parent row).
         summary
           .addRow([
-            conn.connection_name,
+            summaryConnectionLabel(conn),
             '',
             ...extraValuesFor(conn.connection_id),
             conn.status,
@@ -3201,7 +3208,7 @@ async function writeStreamingExcelReplace(
       } else {
         summary
           .addRow([
-            conn.connection_name,
+            summaryConnectionLabel(conn),
             sheetLabelReplace,
             ...extraValuesFor(conn.connection_id),
             conn.status,
@@ -3296,7 +3303,7 @@ function writeSummarySheet(
   // Sheet Name is now shown in BOTH single- and multi-query mode so users can
   // always trace a row back to the worksheet that holds its data.
   sheet.columns = [
-    { header: 'Connection', key: 'connection_name', width: 28 },
+    { header: summaryConnectionHeader(), key: 'connection_name', width: 28 },
     { header: 'Sheet Name', key: 'sheet_name', width: 22 },
     ...extraColumnDefs,
     { header: 'Status', key: 'status', width: 12 },
@@ -3375,7 +3382,7 @@ function writeSummarySheet(
       // In multi-query mode: show one sub-row per query beneath the connection row.
       // Connection row shows aggregated totals; sheet_name is left blank.
       sheet.addRow({
-        connection_name: conn.connection_name,
+        connection_name: summaryConnectionLabel(conn),
         sheet_name: '',
         ...extraValuesObject(conn.connection_id),
         status: conn.status,
@@ -3407,7 +3414,7 @@ function writeSummarySheet(
       }
     } else {
       sheet.addRow({
-        connection_name: conn.connection_name,
+        connection_name: summaryConnectionLabel(conn),
         sheet_name: sheetLabel,
         ...extraValuesObject(conn.connection_id),
         status: conn.status,
@@ -3487,7 +3494,7 @@ function buildGoogleSheetsSummaryRows(
   const extraColumnLabels = extraResolver.labels
 
   const headers = [
-    'Connection',
+    summaryConnectionHeader(),
     'Sheet Name',
     ...extraColumnLabels,
     'Status',
@@ -3543,7 +3550,7 @@ function buildGoogleSheetsSummaryRows(
     const failureReason = conn.error ?? bucketTarget?.bucket.error ?? ''
 
     rows.push([
-      conn.connection_name,
+      summaryConnectionLabel(conn),
       bucketTarget?.tabName ?? '',
       ...extraResolver.getValues(conn.connection_id),
       conn.status,
@@ -3726,12 +3733,14 @@ async function finalizeDirectCsvOutput(
   const summaryPath = path.join(context.outDir, '_summary.csv')
   const summaryRows: string[] = []
   summaryRows.push(
-    ['Connection', 'Status', 'Rows', 'Started At', 'Finished At', 'Error'].map(csvEscape).join(',')
+    [summaryConnectionHeader(), 'Status', 'Rows', 'Started At', 'Finished At', 'Error']
+      .map(csvEscape)
+      .join(',')
   )
   for (const conn of progress.connections) {
     summaryRows.push(
       [
-        conn.connection_name,
+        summaryConnectionLabel(conn),
         conn.status,
         conn.rows,
         conn.started_at ?? '',
@@ -3879,12 +3888,14 @@ async function writeStreamingCsv(
   const summaryPath = path.join(outDir, '_summary.csv')
   const summaryRows: string[] = []
   summaryRows.push(
-    ['Connection', 'Status', 'Rows', 'Started At', 'Finished At', 'Error'].map(csvEscape).join(',')
+    [summaryConnectionHeader(), 'Status', 'Rows', 'Started At', 'Finished At', 'Error']
+      .map(csvEscape)
+      .join(',')
   )
   for (const conn of progress.connections) {
     summaryRows.push(
       [
-        conn.connection_name,
+        summaryConnectionLabel(conn),
         conn.status,
         conn.rows,
         formatUtcToIst(conn.started_at),

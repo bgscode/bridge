@@ -2,8 +2,10 @@ appId: com.electron.app
 productName: Alam
 directories:
   buildResources: build
+  output: dist/${version}
 files:
   - '!**/.vscode/*'
+  - '!dist/**'
   - '!src/*'
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
