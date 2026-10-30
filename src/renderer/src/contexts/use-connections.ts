@@ -5,6 +5,7 @@ export interface ConnectionStatusPatch {
   status: string
   connected_via?: ConnectionPath | null
   latency_ms?: number | null
+  last_tested_at?: string | null
 }
 
 export interface ConnectionsContextValue {

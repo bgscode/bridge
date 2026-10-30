@@ -1,10 +1,17 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
-import { JSX, useEffect, useRef, useState } from 'react'
+import { JSX, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { FileText, Plus, Trash2, RefreshCw } from 'lucide-react'
 import type { JobVariable, SummaryExtraColumnsScope } from '@shared/index'
 import { SUMMARY_EXTRA_COLUMN_OPTIONS } from '@shared/index'
+import {
+  DATE_FORMAT_MAX_LENGTH,
+  DATE_FORMAT_PRESETS,
+  DEFAULT_DATE_FORMAT,
+  previewDateFormat,
+  validateDateFormat
+} from '@shared/date-format'
 
 import { cn, getSpreadsheetId } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -26,6 +33,7 @@ import { SelectBox } from '@/components/select-box'
 import { FileUploader } from '@/components/FileUploader'
 import { useConnections, useFiscalYears, useGroups, useJobGroups, useStores } from '@/contexts'
 import { usePersistentDraft } from '@/hooks/use-persistent-draft'
+import { JobsContext } from '@/contexts/use-jobs'
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -41,6 +49,7 @@ const schema = z
     online_only: z.boolean(),
     is_multi: z.boolean(),
     modify_dates: z.boolean(),
+    date_format: z.string().max(DATE_FORMAT_MAX_LENGTH).optional().nullable(),
     connection_ids: z.array(z.number()).min(1, 'At least one connection is required'),
     sql_query: z.array(z.string().min(1, 'Query cannot be empty')),
     sql_query_names: z.array(z.string()).optional(),
@@ -87,6 +96,11 @@ const schema = z
     schedule_cron: z.string().optional().nullable(),
     schedule_repeat_count: z.number().optional().nullable() // 0 = unlimited
   })
+  .superRefine((v, ctx) => {
+    if (v.type !== 'query' || !v.modify_dates || !v.date_format?.trim()) return
+    const error = validateDateFormat(v.date_format)
+    if (error) ctx.addIssue({ code: 'custom', path: ['date_format'], message: error })
+  })
   .refine((v) => !v.is_multi || v.connection_ids.length <= 1, {
     path: ['connection_ids'],
     message: 'Multi-query mode supports only one connection'
@@ -103,6 +117,7 @@ const DEFAULT_FORM_VALUES: JobFormValues = {
   online_only: false,
   is_multi: false,
   modify_dates: true,
+  date_format: DEFAULT_DATE_FORMAT,
   connection_ids: [],
   sql_query: [''],
   sql_query_names: [],
@@ -493,7 +508,7 @@ function SummaryExtraColumnsField({
     <Field>
       <FieldLabel>Summary Sheet Extra Columns</FieldLabel>
       <p className="text-xs text-muted-foreground mb-2">
-        Select which connection metadata to add after the &quot;Sheet Name&quot; column in the{' '}
+        Select which connection metadata to add after the &quot;Store&quot; column in the{' '}
         {destinationLabel}.
       </p>
       <div className="flex flex-wrap gap-2">
@@ -567,9 +582,9 @@ function SkipFailedSheetsField({
       <div>
         <p className="text-xs font-medium">Skip failed connection sheets</p>
         <p className="text-xs text-muted-foreground">
-          When a connection fails, leave its sheet unchanged if that sheet is already in the
-          file. If the sheet is not there yet, still create it and record the failure on the
-          Summary sheet. Off by default.
+          When a connection fails, leave its sheet unchanged if that sheet is already in the file.
+          If the sheet is not there yet, still create it and record the failure on the Summary
+          sheet. Off by default.
         </p>
       </div>
       <button
@@ -623,6 +638,21 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const onlineOnly = useWatch({ control, name: 'online_only' })
   const isMulti = useWatch({ control, name: 'is_multi' })
   const modifyDates = useWatch({ control, name: 'modify_dates' })
+  const dateFormat = useWatch({ control, name: 'date_format' }) ?? ''
+  const jobsCtx = useContext(JobsContext)
+  // Custom formats already saved on other jobs, offered next to the presets.
+  const savedDateFormats = useMemo(() => {
+    const seen = new Set(DATE_FORMAT_PRESETS)
+    const out: string[] = []
+    for (const job of jobsCtx?.jobs ?? []) {
+      const f = job.date_format?.trim()
+      if (f && !seen.has(f)) {
+        seen.add(f)
+        out.push(f)
+      }
+    }
+    return out
+  }, [jobsCtx?.jobs])
   const sqlQueries = useWatch({ control, name: 'sql_query' }) ?? []
   const scheduleEnabled = useWatch({ control, name: 'schedule_enabled' })
   const scheduleType = useWatch({ control, name: 'schedule_type' })
@@ -791,105 +821,104 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
     }
 
     // Parse destination_config back into sub-fields when editing
-      let api_endpoint = '',
-        api_method: 'GET' | 'POST' | 'PUT' | 'PATCH' = 'POST',
-        api_headers = ''
-      let sheet_id = '',
-        sheet_name = 'Sheet1',
-        sheet_credentials = ''
-      let excel_path = ''
-      let action_file_path = ''
-      let action_file_name = ''
-      let action_sheet_name = ''
-      let action_target_table = ''
-      let action_mode: 'insert' | 'update' | 'upsert' = 'upsert'
-      let action_key_columns = 'id'
-      let action_batch_size = 1000
-      let action_column_mapping = ''
-      if (data?.destination_type && data?.destination_config) {
-        try {
-          if (data.destination_type === 'api') {
-            const p = JSON.parse(data.destination_config)
-            api_endpoint = p.endpoint ?? ''
-            api_method = p.method ?? 'POST'
-            api_headers = p.headers ?? ''
-          } else if (data.destination_type === 'google_sheets') {
-            const p = JSON.parse(data.destination_config)
-            sheet_id = p.spreadsheetId ?? ''
-            sheet_name = p.sheetName ?? 'Sheet1'
-            sheet_credentials = p.credentials ?? ''
-          } else if (data.destination_type === 'excel') {
-            excel_path = data.destination_config
-          }
-        } catch (err) {
-          console.error('Failed to parse destination_config:', err)
-        }
-      }
-
-      if (data?.type === 'action' && data?.destination_config) {
-        try {
+    let api_endpoint = '',
+      api_method: 'GET' | 'POST' | 'PUT' | 'PATCH' = 'POST',
+      api_headers = ''
+    let sheet_id = '',
+      sheet_name = 'Sheet1',
+      sheet_credentials = ''
+    let excel_path = ''
+    let action_file_path = ''
+    let action_file_name = ''
+    let action_sheet_name = ''
+    let action_target_table = ''
+    let action_mode: 'insert' | 'update' | 'upsert' = 'upsert'
+    let action_key_columns = 'id'
+    let action_batch_size = 1000
+    let action_column_mapping = ''
+    if (data?.destination_type && data?.destination_config) {
+      try {
+        if (data.destination_type === 'api') {
           const p = JSON.parse(data.destination_config)
-          action_file_path = p.filePath ?? p.stagedPath ?? ''
-          action_file_name = p.fileName ?? ''
-          action_sheet_name = p.sheetName ?? ''
-          action_target_table = p.table ?? p.targetTable ?? ''
-          action_mode = (p.mode as 'insert' | 'update' | 'upsert') ?? 'upsert'
-          action_key_columns = Array.isArray(p.keyColumns) ? p.keyColumns.join(', ') : 'id'
-          action_batch_size = Number.isFinite(Number(p.batchSize)) ? Number(p.batchSize) : 1000
-          action_column_mapping =
-            p.columnMapping && typeof p.columnMapping === 'object'
-              ? JSON.stringify(p.columnMapping)
-              : ''
-        } catch (err) {
-          console.error('Failed to parse action destination_config:', err)
+          api_endpoint = p.endpoint ?? ''
+          api_method = p.method ?? 'POST'
+          api_headers = p.headers ?? ''
+        } else if (data.destination_type === 'google_sheets') {
+          const p = JSON.parse(data.destination_config)
+          sheet_id = p.spreadsheetId ?? ''
+          sheet_name = p.sheetName ?? 'Sheet1'
+          sheet_credentials = p.credentials ?? ''
+        } else if (data.destination_type === 'excel') {
+          excel_path = data.destination_config
         }
+      } catch (err) {
+        console.error('Failed to parse destination_config:', err)
       }
-      reset({
-        name: data?.name ?? '',
-        description: data?.description ?? '',
-        job_color: normalizeJobColor(data?.job_color ?? null),
-        job_group_id: data?.job_group_id ?? null,
-        type: data?.type ?? 'query',
-        online_only: data?.online_only ?? false,
-        is_multi: data?.is_multi ?? false,
-        modify_dates: data?.modify_dates ?? true,
-        connection_ids: normalizeNumberArray(data?.connection_ids ?? []),
-        sql_query: data?.sql_query?.length ? data.sql_query : [''],
-        sql_query_names: data?.sql_query?.length
-          ? (data.sql_query_names?.slice(0, data.sql_query.length) ?? []).concat(
-              Array(Math.max(0, data.sql_query.length - (data.sql_query_names?.length ?? 0))).fill(
-                ''
-              )
-            )
-          : [],
-        destination_type: data?.destination_type ?? null,
-        destination_config: data?.destination_config ?? null,
-        operation: data?.operation ?? null,
-        notify_webhook: data?.notify_webhook ?? '',
-        api_endpoint,
-        api_method,
-        api_headers,
-        sheet_id,
-        sheet_name,
-        sheet_credentials,
-        excel_path,
-        template_path: data?.template_path ?? null,
-        template_mode: data?.template_mode ?? null,
-        summary_extra_columns: data?.summary_extra_columns ?? null,
-        summary_extra_columns_scope: data?.summary_extra_columns_scope ?? 'summary_only',
-        excel_combine_sheets: data?.excel_combine_sheets ?? false,
-        skip_failed_connection_sheets: data?.skip_failed_connection_sheets ?? false,
-        action_file_path,
-        action_file_name,
-        action_sheet_name,
-        action_target_table,
-        action_mode,
-        action_key_columns,
-        action_batch_size,
-        action_column_mapping,
-        // Parse schedule JSON back into sub-fields
-        ...parseSchedule(data?.schedule_raw)
-      })
+    }
+
+    if (data?.type === 'action' && data?.destination_config) {
+      try {
+        const p = JSON.parse(data.destination_config)
+        action_file_path = p.filePath ?? p.stagedPath ?? ''
+        action_file_name = p.fileName ?? ''
+        action_sheet_name = p.sheetName ?? ''
+        action_target_table = p.table ?? p.targetTable ?? ''
+        action_mode = (p.mode as 'insert' | 'update' | 'upsert') ?? 'upsert'
+        action_key_columns = Array.isArray(p.keyColumns) ? p.keyColumns.join(', ') : 'id'
+        action_batch_size = Number.isFinite(Number(p.batchSize)) ? Number(p.batchSize) : 1000
+        action_column_mapping =
+          p.columnMapping && typeof p.columnMapping === 'object'
+            ? JSON.stringify(p.columnMapping)
+            : ''
+      } catch (err) {
+        console.error('Failed to parse action destination_config:', err)
+      }
+    }
+    reset({
+      name: data?.name ?? '',
+      description: data?.description ?? '',
+      job_color: normalizeJobColor(data?.job_color ?? null),
+      job_group_id: data?.job_group_id ?? null,
+      type: data?.type ?? 'query',
+      online_only: data?.online_only ?? false,
+      is_multi: data?.is_multi ?? false,
+      modify_dates: data?.modify_dates ?? true,
+      date_format: data?.date_format ?? DEFAULT_DATE_FORMAT,
+      connection_ids: normalizeNumberArray(data?.connection_ids ?? []),
+      sql_query: data?.sql_query?.length ? data.sql_query : [''],
+      sql_query_names: data?.sql_query?.length
+        ? (data.sql_query_names?.slice(0, data.sql_query.length) ?? []).concat(
+            Array(Math.max(0, data.sql_query.length - (data.sql_query_names?.length ?? 0))).fill('')
+          )
+        : [],
+      destination_type: data?.destination_type ?? null,
+      destination_config: data?.destination_config ?? null,
+      operation: data?.operation ?? null,
+      notify_webhook: data?.notify_webhook ?? '',
+      api_endpoint,
+      api_method,
+      api_headers,
+      sheet_id,
+      sheet_name,
+      sheet_credentials,
+      excel_path,
+      template_path: data?.template_path ?? null,
+      template_mode: data?.template_mode ?? null,
+      summary_extra_columns: data?.summary_extra_columns ?? null,
+      summary_extra_columns_scope: data?.summary_extra_columns_scope ?? 'summary_only',
+      excel_combine_sheets: data?.excel_combine_sheets ?? false,
+      skip_failed_connection_sheets: data?.skip_failed_connection_sheets ?? false,
+      action_file_path,
+      action_file_name,
+      action_sheet_name,
+      action_target_table,
+      action_mode,
+      action_key_columns,
+      action_batch_size,
+      action_column_mapping,
+      // Parse schedule JSON back into sub-fields
+      ...parseSchedule(data?.schedule_raw)
+    })
   }, [isOpen, mode, data, reset, createDraft])
 
   useEffect(() => {
@@ -1481,8 +1510,8 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                       <div>
                         <p className="text-xs font-medium">Modify date format</p>
                         <p className="text-xs text-muted-foreground">
-                          When ON, dates are formatted as dd/mm/yyyy (time removed). When OFF, date
-                          values are written exactly as received from the server.
+                          When ON, dates are written in the format below. When OFF, date values are
+                          written exactly as received from the server.
                         </p>
                       </div>
                       <button
@@ -1504,6 +1533,55 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                         />
                       </button>
                     </div>
+                  )}
+
+                  {jobType === 'query' && modifyDates && (
+                    <Field data-invalid={!!errors.date_format}>
+                      <FieldLabel htmlFor="date_format" className="text-xs">
+                        Date format
+                      </FieldLabel>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          id="date_format"
+                          placeholder={DEFAULT_DATE_FORMAT}
+                          maxLength={DATE_FORMAT_MAX_LENGTH}
+                          className="h-8 font-mono text-xs"
+                          {...register('date_format')}
+                        />
+                        <span className="shrink-0 rounded-md bg-muted px-2 py-1 font-mono text-xs tabular-nums">
+                          {validateDateFormat(dateFormat || DEFAULT_DATE_FORMAT)
+                            ? '—'
+                            : previewDateFormat(dateFormat)}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {[...DATE_FORMAT_PRESETS, ...savedDateFormats].map((f) => (
+                          <button
+                            key={f}
+                            type="button"
+                            onClick={() =>
+                              setValue('date_format', f, {
+                                shouldDirty: true,
+                                shouldValidate: true
+                              })
+                            }
+                            className={cn(
+                              'rounded-md border px-1.5 py-0.5 font-mono text-[11px] transition-colors hover:bg-accent',
+                              (dateFormat.trim() || DEFAULT_DATE_FORMAT) === f &&
+                                'border-primary bg-primary/10 text-primary'
+                            )}
+                          >
+                            {f}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Type your own: <code>dd</code> day, <code>mm</code> month, <code>mmm</code>{' '}
+                        Jan, <code>yyyy</code> year, <code>hh:mm:ss</code> time, <code>AM/PM</code>,{' '}
+                        <code>[text]</code> fixed text. Example: <code>dd-mmm-yyyy hh:mm</code>
+                      </p>
+                      <FieldError errors={[errors.date_format]} />
+                    </Field>
                   )}
                 </div>
               </FormSection>
@@ -2254,11 +2332,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                         <SkipFailedSheetsField
                           enabled={skipFailedConnectionSheets}
                           onToggle={() =>
-                            setValue(
-                              'skip_failed_connection_sheets',
-                              !skipFailedConnectionSheets,
-                              { shouldDirty: true }
-                            )
+                            setValue('skip_failed_connection_sheets', !skipFailedConnectionSheets, {
+                              shouldDirty: true
+                            })
                           }
                         />
                       </>
@@ -2361,11 +2437,9 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                         <SkipFailedSheetsField
                           enabled={skipFailedConnectionSheets}
                           onToggle={() =>
-                            setValue(
-                              'skip_failed_connection_sheets',
-                              !skipFailedConnectionSheets,
-                              { shouldDirty: true }
-                            )
+                            setValue('skip_failed_connection_sheets', !skipFailedConnectionSheets, {
+                              shouldDirty: true
+                            })
                           }
                         />
                       </div>

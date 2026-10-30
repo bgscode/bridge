@@ -11,6 +11,7 @@ import type {
   JobConnectionProgress,
   JobRunOptions
 } from '@shared/index'
+import { DEFAULT_DATE_FORMAT, formatDateValue } from '@shared/date-format'
 import { connectUsingBestIp } from '../connection/sql-connector'
 import { connection as connectionRepo } from '../../db/repositories/connection.repository'
 import { jobRepository } from '../../db/repositories/job.repository'
@@ -879,53 +880,23 @@ async function executeStreamingForConnection(
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
- * Format a single cell value coming from an SQL query result row.
- * - Date objects            → "dd/mm/yyyy"
- * - Date-only strings       → "dd/mm/yyyy"  (e.g. "2024-03-15", "2024-03-15T00:00:00.000Z")
- * - DateTime strings        → "dd/mm/yyyy HH:MM:SS"
- * - Everything else         → returned as-is (numbers, booleans, null, etc.)
- *
- * Applied to ALL query data sheets. The Summary sheet is NOT affected —
- * it uses its own `formatUtcToIst` formatter.
+ * Date format a job writes into data sheets, or null to keep SQL values as-is.
+ * The Summary sheet is NOT affected — it uses its own `formatUtcToIst` formatter.
  */
-function formatQueryValue(v: unknown): unknown {
-  if (v === null || v === undefined) return v
-
-  let d: Date | null = null
-
-  if (v instanceof Date) {
-    d = v
-  } else if (typeof v === 'string') {
-    // Only attempt to parse strings that look like dates.
-    // Patterns: "2024-03-15", "2024-03-15T10:30:00", "2024-03-15T10:30:00.000Z",
-    //           "2024-03-15 10:30:00", "2024/03/15", etc.
-    if (/^\d{4}[-/]\d{2}[-/]\d{2}/.test(v)) {
-      const parsed = new Date(v)
-      if (!Number.isNaN(parsed.getTime())) d = parsed
-    }
-  }
-
-  if (!d) return v // not a date — pass through unchanged
-
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  const dd = pad(d.getDate())
-  const mm = pad(d.getMonth() + 1)
-  const yyyy = d.getFullYear()
-
-  // Data sheets: always dd/mm/yyyy — no time component.
-  return `${dd}/${mm}/${yyyy}`
+function jobDateFormat(job: Pick<JobRow, 'modify_dates' | 'date_format'>): string | null {
+  if (job.modify_dates === false) return null
+  return job.date_format?.trim() || DEFAULT_DATE_FORMAT
 }
 
-/**
- * Apply `formatQueryValue` to every value in a row object, returning a
- * new object with dates converted to dd/mm/yyyy strings.
- * When `modifyDates` is false the row is returned as-is.
- */
-function formatQueryRow(row: Record<string, unknown>, modifyDates = true): Record<string, unknown> {
-  if (!modifyDates) return row
+/** Format every date-like value in a row; returns the row as-is when `dateFormat` is null. */
+function formatQueryRow(
+  row: Record<string, unknown>,
+  dateFormat: string | null = DEFAULT_DATE_FORMAT
+): Record<string, unknown> {
+  if (!dateFormat) return row
   const out: Record<string, unknown> = {}
   for (const key of Object.keys(row)) {
-    out[key] = formatQueryValue(row[key])
+    out[key] = formatDateValue(row[key], dateFormat)
   }
   return out
 }
@@ -1396,7 +1367,7 @@ async function writeInPlaceExcelReplace(
   allChunkFiles: Map<string, string[]>,
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
-  modifyDates = true,
+  dateFormat: string | null = DEFAULT_DATE_FORMAT,
   summaryExtraColumns: string[] = [],
   skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): Promise<string | null> {
@@ -1502,7 +1473,7 @@ async function writeInPlaceExcelReplace(
 
     for (const chunkFile of bucket.chunkFiles) {
       await streamChunkRows(chunkFile, (row) => {
-        const fmtRow = formatQueryRow(row, modifyDates)
+        const fmtRow = formatQueryRow(row, dateFormat)
         if (!headersSet) {
           headers = Object.keys(fmtRow)
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
@@ -1722,7 +1693,7 @@ function buildOpenXmlSummarySheetSpec(
 
 function buildOpenXmlBucketSheetSpecs(
   buckets: OutputBucket[],
-  modifyDates: boolean,
+  dateFormat: string | null,
   taken: Set<string>
 ): OpenXmlSheetSpec[] {
   const threshold = resolveSheetRowThreshold()
@@ -1773,6 +1744,7 @@ function buildOpenXmlBucketSheetSpecs(
           let wroteHeader = false
 
           for (const chunkFile of bucket.chunkFiles) {
+            if (dataIndex >= partEnd) break
             await streamChunkRows(chunkFile, async (row) => {
               if (!headers) headers = Object.keys(row)
               if (dataIndex >= partStart && dataIndex < partEnd) {
@@ -1781,7 +1753,9 @@ function buildOpenXmlBucketSheetSpecs(
                   wroteHeader = true
                 }
                 await writeRow(
-                  headers!.map((key) => (modifyDates ? formatQueryValue(row[key]) : row[key]))
+                  headers!.map((key) =>
+                    dateFormat ? formatDateValue(row[key], dateFormat) : row[key]
+                  )
                 )
               }
               dataIndex++
@@ -1814,7 +1788,7 @@ async function writeOpenXmlExcelReplace(
   allChunkFiles: Map<string, string[]>,
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
-  modifyDates = true,
+  dateFormat: string | null = DEFAULT_DATE_FORMAT,
   summaryExtraColumns: string[] = [],
   skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): Promise<string> {
@@ -1828,7 +1802,7 @@ async function writeOpenXmlExcelReplace(
   )
   const patterns = bucketSheetNamePatterns(buckets)
   const taken = new Set<string>(['summary'])
-  const bucketSpecs = buildOpenXmlBucketSheetSpecs(buckets, modifyDates, taken)
+  const bucketSpecs = buildOpenXmlBucketSheetSpecs(buckets, dateFormat, taken)
   const summarySpec = buildOpenXmlSummarySheetSpec(
     jobName,
     progress,
@@ -1858,10 +1832,8 @@ async function writeOpenXmlExcelCombined(
   allChunkFiles: Map<string, string[]>,
   summaryExtraColumns: string[] = [],
   summaryExtraColumnsScope: 'summary_only' | 'summary_and_combined' = 'summary_only',
-  modifyDates = true,
+  dateFormat: string | null = DEFAULT_DATE_FORMAT,
   options?: {
-    /** Also rewrite per-connection bucket sheets. Small jobs do this today via ExcelJS. */
-    includeBucketSheets?: boolean
     skipFailedConnectionIds?: ReadonlySet<number>
   }
 ): Promise<string> {
@@ -1903,14 +1875,15 @@ async function writeOpenXmlExcelCombined(
           const sheetLabel = resolveConnectionLabel(conn)
 
           for (const chunkFile of chunkFiles) {
+            if (dataIndex >= partEnd) break
             await streamChunkRows(chunkFile, async (row) => {
-              const fmtRow = formatQueryRow(row, modifyDates)
+              const fmtRow = formatQueryRow(row, dateFormat)
               const rowKeys = Object.keys(fmtRow)
               const values = Object.values(fmtRow) as unknown[]
               if (!headers) {
                 headers = combinedExtraResolver
-                  ? ['Sheet Name', ...combinedExtraResolver.labels, ...rowKeys]
-                  : ['Sheet Name', ...rowKeys]
+                  ? [summaryConnectionHeader(), ...combinedExtraResolver.labels, ...rowKeys]
+                  : [summaryConnectionHeader(), ...rowKeys]
               }
               if (dataIndex >= partStart && dataIndex < partEnd) {
                 if (!wroteHeader) {
@@ -1941,20 +1914,18 @@ async function writeOpenXmlExcelCombined(
     summaryExtraColumns
   )
 
-  // Large jobs rewrite only Data + Summary so we don't duplicate millions of
-  // rows into per-connection tabs. Small jobs also refresh bucket sheets,
-  // matching the previous in-memory ExcelJS replace.
+  // Combined output is Data + Summary only. Per-connection sheets left by an
+  // earlier non-combined run are still owned, so the rewrite drops them.
   const skipFailed = options?.skipFailedConnectionIds ?? new Set<number>()
-  const existingNames = options?.includeBucketSheets
-    ? await existingWorkbookSheetNames(filePath)
-    : undefined
-  const buckets = options?.includeBucketSheets
-    ? listOutputBuckets(connections, allChunkFiles, [], new Map(), skipFailed, existingNames)
-    : []
+  const buckets = listOutputBuckets(
+    connections,
+    allChunkFiles,
+    [],
+    new Map(),
+    skipFailed,
+    await existingWorkbookSheetNames(filePath)
+  )
   const bucketPatterns = bucketSheetNamePatterns(buckets)
-  const bucketSpecs = options?.includeBucketSheets
-    ? buildOpenXmlBucketSheetSpecs(buckets, modifyDates, taken)
-    : []
 
   return rewriteXlsxPreservingOtherSheets({
     sourcePath: filePath,
@@ -1964,10 +1935,9 @@ async function writeOpenXmlExcelCombined(
       if (lc === 'summary') return true
       if (lc === 'data') return true
       if (lc.startsWith('data') && /_part\d+$/.test(lc)) return true
-      if (options?.includeBucketSheets && isBucketSheetName(name, bucketPatterns)) return true
-      return false
+      return isBucketSheetName(name, bucketPatterns)
     },
-    sheets: [...dataSpecs, ...bucketSpecs, summarySpec]
+    sheets: [...dataSpecs, summarySpec]
   })
 }
 
@@ -1985,8 +1955,7 @@ async function writeStreamingExcelCombinedStream(
   allChunkFiles: Map<string, string[]>,
   summaryExtraColumns: string[] = [],
   summaryExtraColumnsScope: 'summary_only' | 'summary_and_combined' = 'summary_only',
-  modifyDates = true,
-  skipFailedConnectionIds: ReadonlySet<number> = new Set()
+  dateFormat: string | null = DEFAULT_DATE_FORMAT
 ): Promise<string> {
   let resolvedDir = path.dirname(filePath)
   try {
@@ -2016,14 +1985,6 @@ async function writeStreamingExcelCombinedStream(
   try {
     const threshold = resolveSheetRowThreshold()
     const taken = new Set<string>(['summary'])
-    const buckets = listOutputBuckets(
-      connections,
-      allChunkFiles,
-      [],
-      new Map(),
-      skipFailedConnectionIds,
-      await existingWorkbookSheetNames(filePath)
-    )
 
     const includeCombinedExtraColumns =
       summaryExtraColumnsScope === 'summary_and_combined' && summaryExtraColumns.length > 0
@@ -2057,14 +2018,14 @@ async function writeStreamingExcelCombinedStream(
 
       for (const chunkFile of chunkFiles) {
         await streamChunkRows(chunkFile, (row) => {
-          const fmtRow = formatQueryRow(row, modifyDates)
+          const fmtRow = formatQueryRow(row, dateFormat)
           const rowKeys = Object.keys(fmtRow)
           const values = Object.values(fmtRow) as unknown[]
 
           if (!dataHeadersSet) {
             dataHeaders = combinedExtraResolver
-              ? ['Sheet Name', ...combinedExtraResolver.labels, ...rowKeys]
-              : ['Sheet Name', ...rowKeys]
+              ? [summaryConnectionHeader(), ...combinedExtraResolver.labels, ...rowKeys]
+              : [summaryConnectionHeader(), ...rowKeys]
             writeDataHeader()
             dataHeadersSet = true
           }
@@ -2091,64 +2052,6 @@ async function writeStreamingExcelCombinedStream(
       // No rows at all — still emit an empty Data sheet with a placeholder.
       dataSheet.addRow(['No rows found']).commit()
       dataSheet.commit()
-    }
-
-    // ── Individual per-connection sheets ───────────────────────────────────
-    for (const bucket of buckets) {
-      const baseSheetName = sanitizeSheetName(bucket.label)
-      const willSplit = bucket.rows > threshold
-      let rolloverIndex = 0
-      let sheet = workbook.addWorksheet(nextRolloverSheetName(baseSheetName, 0, taken, willSplit))
-      let headers: string[] = []
-      let hasHeader = false
-      let rowsInSheet = 0
-
-      const writeHeader = (): void => {
-        sheet.addRow(headers).commit()
-        rowsInSheet = 1
-      }
-
-      if (bucket.chunkFiles.length === 0) {
-        if (bucket.columns.length > 0) {
-          headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
-        } else if (bucket.error) {
-          headers = ['Error']
-        } else {
-          headers = ['No rows found']
-        }
-        writeHeader()
-        if (bucket.error) {
-          sheet.addRow(headers.map((h) => (h === 'Error' ? bucket.error : ''))).commit()
-        } else if (!bucket.columns.length) {
-          sheet.addRow(['No rows found']).commit()
-        }
-        sheet.commit()
-        continue
-      }
-
-      for (const chunkFile of bucket.chunkFiles) {
-        await streamChunkRows(chunkFile, (row) => {
-          if (!hasHeader) {
-            headers = Object.keys(row)
-            writeHeader()
-            hasHeader = true
-          }
-          if (rowsInSheet >= threshold) {
-            sheet.commit()
-            rolloverIndex++
-            sheet = workbook.addWorksheet(
-              nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
-            )
-            writeHeader()
-          }
-          const values = headers.map(
-            (key) => (modifyDates ? formatQueryValue(row[key]) : row[key]) as ExcelJS.CellValue
-          )
-          sheet.addRow(values).commit()
-          rowsInSheet++
-        })
-      }
-      sheet.commit()
     }
 
     // ── Summary (mirrors writeStreamingExcelReplace summary) ───────────────
@@ -2316,7 +2219,7 @@ async function writeStreamingExcelCombined(
   allChunkFiles: Map<string, string[]>,
   summaryExtraColumns: string[] = [],
   summaryExtraColumnsScope: 'summary_only' | 'summary_and_combined' = 'summary_only',
-  modifyDates = true,
+  dateFormat: string | null = DEFAULT_DATE_FORMAT,
   template?: {
     templatePath: string | null
     templateMode: 'new' | 'existing' | null
@@ -2373,11 +2276,8 @@ async function writeStreamingExcelCombined(
         allChunkFiles,
         summaryExtraColumns,
         summaryExtraColumnsScope,
-        modifyDates,
-        {
-          includeBucketSheets: estimatedCombinedRows <= IN_MEMORY_EXCEL_ROW_LIMIT,
-          skipFailedConnectionIds
-        }
+        dateFormat,
+        { skipFailedConnectionIds }
       )
     } catch (err) {
       progress.error =
@@ -2402,8 +2302,7 @@ async function writeStreamingExcelCombined(
       allChunkFiles,
       summaryExtraColumns,
       summaryExtraColumnsScope,
-      modifyDates,
-      skipFailedConnectionIds
+      dateFormat
     )
   }
 
@@ -2473,15 +2372,15 @@ async function writeStreamingExcelCombined(
 
     for (const chunkFile of chunkFiles) {
       await streamChunkRows(chunkFile, (row) => {
-        const fmtRow = formatQueryRow(row, modifyDates)
+        const fmtRow = formatQueryRow(row, dateFormat)
         const rowKeys = Object.keys(fmtRow)
         const values = Object.values(fmtRow) as unknown[]
 
         // Write ONE styled header row at the very top — first column is "Sheet Name"
         if (!globalHeadersSet) {
           const allHeaders = combinedExtraResolver
-            ? ['Sheet Name', ...combinedExtraResolver.labels, ...rowKeys]
-            : ['Sheet Name', ...rowKeys]
+            ? [summaryConnectionHeader(), ...combinedExtraResolver.labels, ...rowKeys]
+            : [summaryConnectionHeader(), ...rowKeys]
           dataSheet.columns = allHeaders.map((h, i) => ({
             width:
               i === 0
@@ -2509,63 +2408,6 @@ async function writeStreamingExcelCombined(
         const extraValues = combinedExtraResolver?.getValues(conn.id) ?? []
         // Sheet Name is the first value in every data row
         dataSheet.addRow([sheetName, ...extraValues, ...values])
-      })
-    }
-  }
-
-  // ── Individual per-connection sheets (same as normal Excel mode) ─────────
-  const threshold = resolveSheetRowThreshold()
-  const taken = new Set<string>(['data', 'summary'])
-  for (const ws of workbook.worksheets) taken.add(ws.name.toLowerCase())
-
-  for (const bucket of buckets) {
-    const baseSheetName = sanitizeSheetName(bucket.label)
-    const willSplit = bucket.rows > threshold
-    const name = nextRolloverSheetName(baseSheetName, 0, taken, willSplit)
-    let sheet = workbook.addWorksheet(name)
-    taken.add(name.toLowerCase())
-    let rolloverIndex = 0
-    let headers: string[] = []
-    let headersSet = false
-    let rowsInSheet = 0
-
-    if (bucket.chunkFiles.length === 0) {
-      if (bucket.columns.length > 0) {
-        headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
-        sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
-      } else {
-        sheet.columns = [{ header: 'No rows found', key: 'msg', width: 30 }]
-      }
-      if (bucket.error) {
-        const cells: Record<string, unknown> = {}
-        for (const c of bucket.columns) cells[c] = ''
-        cells['Error'] = bucket.error
-        sheet.addRow(cells)
-      } else if (!bucket.columns.length) {
-        sheet.addRow({ msg: 'No rows found' })
-      }
-      continue
-    }
-
-    for (const chunkFile of bucket.chunkFiles) {
-      await streamChunkRows(chunkFile, (row) => {
-        const fmtRow = formatQueryRow(row, modifyDates)
-        if (!headersSet) {
-          headers = Object.keys(fmtRow)
-          sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
-          headersSet = true
-          rowsInSheet = 1
-        }
-        if (rowsInSheet >= threshold) {
-          rolloverIndex++
-          const nextName = nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
-          sheet = workbook.addWorksheet(nextName)
-          taken.add(nextName.toLowerCase())
-          sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
-          rowsInSheet = 1
-        }
-        sheet.addRow(fmtRow)
-        rowsInSheet++
       })
     }
   }
@@ -2598,7 +2440,7 @@ async function writeStreamingExcel(
   },
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
-  modifyDates = true,
+  dateFormat: string | null = DEFAULT_DATE_FORMAT,
   summaryExtraColumns: string[] = [],
   skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): Promise<string> {
@@ -2669,7 +2511,7 @@ async function writeStreamingExcel(
           allChunkFiles,
           queryNames,
           allBucketMeta,
-          modifyDates,
+          dateFormat,
           summaryExtraColumns,
           skipFailedConnectionIds
         )
@@ -2696,7 +2538,7 @@ async function writeStreamingExcel(
         allChunkFiles,
         queryNames,
         allBucketMeta,
-        modifyDates,
+        dateFormat,
         summaryExtraColumns,
         skipFailedConnectionIds
       )
@@ -2728,7 +2570,7 @@ async function writeStreamingExcel(
       queryNames,
       allBucketMeta,
       undefined,
-      modifyDates,
+      dateFormat,
       summaryExtraColumns,
       skipFailedConnectionIds
     )
@@ -2775,7 +2617,7 @@ async function writeStreamingExcel(
       queryNames,
       allBucketMeta,
       undefined,
-      modifyDates,
+      dateFormat,
       summaryExtraColumns,
       skipFailedConnectionIds
     )
@@ -2871,7 +2713,7 @@ async function writeStreamingExcel(
     for (const chunkFile of bucket.chunkFiles) {
       let firstRowSeen = false
       await streamChunkRows(chunkFile, (row) => {
-        const fmtRow = formatQueryRow(row, modifyDates)
+        const fmtRow = formatQueryRow(row, dateFormat)
         if (!headersSet) {
           headers = Object.keys(fmtRow)
           sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
@@ -2929,7 +2771,7 @@ async function writeStreamingExcelReplace(
   queryNames: string[] = [],
   allBucketMeta: Map<string, BucketMeta> = new Map(),
   preservedSheets: PreservedSheet[] = [],
-  modifyDates = true,
+  dateFormat: string | null = DEFAULT_DATE_FORMAT,
   summaryExtraColumns: string[] = [],
   skipFailedConnectionIds: ReadonlySet<number> = new Set()
 ): Promise<string> {
@@ -3020,7 +2862,8 @@ async function writeStreamingExcelReplace(
             writeHeader()
           }
           const values = headers.map(
-            (key) => (modifyDates ? formatQueryValue(row[key]) : row[key]) as ExcelJS.CellValue
+            (key) =>
+              (dateFormat ? formatDateValue(row[key], dateFormat) : row[key]) as ExcelJS.CellValue
           )
           sheet.addRow(values).commit()
           rowsInSheet++
@@ -3575,10 +3418,13 @@ function estimateGoogleSheetTotalWriteRows(args: {
   combineSheets: boolean
   summaryRows: Array<Array<string | number | boolean>>
 }): number {
-  const bucketRows = args.buckets.reduce(
-    (total, bucket) => total + estimateGoogleSheetBucketWriteRows(bucket),
-    0
-  )
+  // Combined mode writes no per-connection tabs.
+  const bucketRows = args.combineSheets
+    ? 0
+    : args.buckets.reduce(
+        (total, bucket) => total + estimateGoogleSheetBucketWriteRows(bucket),
+        0
+      )
   const combinedDataRows = args.combineSheets
     ? Math.max(
         args.buckets.reduce((total, bucket) => total + Math.max(bucket.rowCount ?? 0, 0), 0),
@@ -4732,7 +4578,7 @@ export async function runJob(
                 allChunkFiles,
                 job.summary_extra_columns ?? [],
                 job.summary_extra_columns_scope ?? 'summary_only',
-                job.modify_dates !== false,
+                jobDateFormat(job),
                 {
                   templatePath: await resolveMachineLocalTemplatePath(job.template_path, job.name),
                   templateMode: job.template_mode
@@ -4752,7 +4598,7 @@ export async function runJob(
                 },
                 isMultiQuery ? (job.sql_query_names ?? []) : [],
                 allBucketMeta,
-                job.modify_dates !== false,
+                jobDateFormat(job),
                 job.summary_extra_columns ?? [],
                 skipFailedConnectionIds
               )
@@ -4895,9 +4741,14 @@ export async function runJob(
           configJson: effectiveDestinationConfig as string,
           operation: (job.operation as 'append' | 'replace' | null) ?? null,
           buckets: googleSheetBuckets,
-          readChunk: readChunkFromFile,
+          readChunk: async (filePath: string) => {
+            const rows = await readChunkFromFile(filePath)
+            const dateFormat = jobDateFormat(job)
+            return dateFormat ? rows.map((row) => formatQueryRow(row, dateFormat)) : rows
+          },
           combineSheets: shouldCreateCombinedSheet,
           combinedExtraColumnLabels: combinedExtraResolver?.labels,
+          combinedLabelHeader: summaryConnectionHeader(),
           getCombinedExtraValues: combinedExtraResolver
             ? (connectionId: number) => combinedExtraResolver.getValues(connectionId)
             : undefined,

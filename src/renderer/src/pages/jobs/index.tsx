@@ -200,6 +200,7 @@ export default function JobsPage(): JSX.Element {
       template_path: isAction ? null : (values.template_path ?? null),
       template_mode: isAction ? null : (values.template_mode ?? null),
       modify_dates: isAction ? true : (values.modify_dates ?? true),
+      date_format: isAction ? null : values.date_format?.trim() || null,
       schedule: values.schedule ?? null,
       summary_extra_columns:
         !isAction &&
@@ -250,6 +251,7 @@ export default function JobsPage(): JSX.Element {
       template_path: job.template_path,
       template_mode: job.template_mode,
       modify_dates: job.modify_dates,
+      date_format: job.date_format,
       schedule: job.schedule,
       summary_extra_columns: job.summary_extra_columns,
       summary_extra_columns_scope: job.summary_extra_columns_scope ?? 'summary_only',

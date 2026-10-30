@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import type { ConnectionRow, CreateConnectionDto } from '@shared/index'
-import { ConnectionsContext } from './use-connections'
+import { ConnectionsContext, type ConnectionStatusPatch } from './use-connections'
 
 // ─── Provider ────────────────────────────────────────────────────────────────
 
@@ -95,7 +95,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }): Reac
     []
   )
 
-  const updateStatus = useCallback((id: number, patch: string | { status: string; connected_via?: ConnectionRow['connected_via']; latency_ms?: number | null }) => {
+  const updateStatus = useCallback((id: number, patch: string | ConnectionStatusPatch) => {
     const data = typeof patch === 'string' ? { status: patch } : patch
     setConnections((prev) =>
       prev.map((c) =>
@@ -104,7 +104,8 @@ export function ConnectionsProvider({ children }: { children: ReactNode }): Reac
               ...c,
               status: data.status as ConnectionRow['status'],
               ...(data.connected_via !== undefined ? { connected_via: data.connected_via } : {}),
-              ...(data.latency_ms !== undefined ? { latency_ms: data.latency_ms } : {})
+              ...(data.latency_ms !== undefined ? { latency_ms: data.latency_ms } : {}),
+              ...(data.last_tested_at !== undefined ? { last_tested_at: data.last_tested_at } : {})
             }
           : c
       )
@@ -113,7 +114,17 @@ export function ConnectionsProvider({ children }: { children: ReactNode }): Reac
 
   return (
     <ConnectionsContext.Provider
-      value={{ connections, create, update, remove, removeMany, bulkCreate, bulkUpdateCredentials, reload, updateStatus }}
+      value={{
+        connections,
+        create,
+        update,
+        remove,
+        removeMany,
+        bulkCreate,
+        bulkUpdateCredentials,
+        reload,
+        updateStatus
+      }}
     >
       {children}
     </ConnectionsContext.Provider>

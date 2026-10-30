@@ -23,8 +23,13 @@ const WORKSHEET_CT =
 const WORKSHEET_REL_TYPE =
   'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet'
 
+/** Chars XML 1.0 forbids (control chars, lone surrogates, U+FFFE/FFFF). */
+const INVALID_XML_CHARS_RE =
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
+
 export function escapeXml(value: string): string {
   return value
+    .replace(INVALID_XML_CHARS_RE, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -46,8 +51,10 @@ export function colLetter(index0: number): string {
 
 export function cellXml(col: string, row: number, value: unknown): string {
   const ref = `${col}${row}`
+  // Empty cells are omitted entirely — keeps the sheet part small (some
+  // readers cap elements per part) and is valid SpreadsheetML.
   if (value === null || value === undefined || value === '') {
-    return `<c r="${ref}"/>`
+    return ''
   }
   if (typeof value === 'number' && Number.isFinite(value)) {
     return `<c r="${ref}"><v>${value}</v></c>`

@@ -27,7 +27,8 @@ describe('xlsx-openxml-stream helpers', () => {
     expect(cellXml('A', 1, 'hello')).toContain('t="inlineStr"')
     expect(cellXml('B', 1, 42)).toBe('<c r="B1"><v>42</v></c>')
     expect(cellXml('C', 1, true)).toBe('<c r="C1" t="b"><v>1</v></c>')
-    expect(cellXml('D', 1, null)).toBe('<c r="D1"/>')
+    expect(cellXml('D', 1, null)).toBe('')
+    expect(cellXml('E', 1, 'a\u0001b')).toContain('>ab</t>')
   })
 
   it('parses workbook sheet map from workbook.xml + rels', () => {

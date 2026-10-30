@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 import type { Table } from '@tanstack/react-table'
-import { Search, X, Download, Upload, Columns3, SlidersHorizontal, Rows3 } from 'lucide-react'
+import { Search, X, Download, Upload, Columns3, FilterX, Rows3 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -21,7 +21,9 @@ interface DataGridToolbarProps<TData> {
   onGlobalFilterChange: (v: string) => void
   density: DataGridDensity
   onDensityChange: (d: DataGridDensity) => void
-  onFilterPanelToggle: () => void
+  /** Number of active header column filters. */
+  activeFilterCount: number
+  onClearFilters: () => void
   onColumnPanelToggle: () => void
   onImport?: (file: File) => void
   onExport?: (
@@ -31,7 +33,6 @@ interface DataGridToolbarProps<TData> {
   ) => void | Promise<void>
   options: DataGridToolbarOptions
   exportFilename?: string
-  filterPanelOpen: boolean
   columnPanelOpen: boolean
   selectedCount: number
   columnPanelButtonRef?: React.RefObject<HTMLButtonElement | null>
@@ -49,13 +50,13 @@ export function DataGridToolbar<TData>({
   onGlobalFilterChange,
   density,
   onDensityChange,
-  onFilterPanelToggle,
+  activeFilterCount,
+  onClearFilters,
   onColumnPanelToggle,
   onImport,
   onExport,
   options,
   exportFilename = 'export',
-  filterPanelOpen,
   columnPanelOpen,
   selectedCount,
   columnPanelButtonRef
@@ -134,21 +135,12 @@ export function DataGridToolbar<TData>({
 
       {/* Right — action buttons */}
       <div className="flex items-center gap-1 shrink-0">
-        {/* Advanced Filter Toggle */}
-        {options.showFilterPanel !== false && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant={filterPanelOpen ? 'secondary' : 'ghost'}
-                size="icon"
-                className="h-8 w-8"
-                onClick={onFilterPanelToggle}
-              >
-                <SlidersHorizontal className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Advanced Filters</TooltipContent>
-          </Tooltip>
+        {/* Clear header column filters */}
+        {options.showFilterPanel !== false && activeFilterCount > 0 && (
+          <Button variant="secondary" size="sm" className="h-8 text-xs" onClick={onClearFilters}>
+            <FilterX className="h-3.5 w-3.5 mr-1" />
+            Clear filters ({activeFilterCount})
+          </Button>
         )}
 
         {/* Column Panel Toggle */}

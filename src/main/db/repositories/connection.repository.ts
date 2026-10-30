@@ -81,6 +81,7 @@ export const connection = {
          status        = @status,
          connected_via = @connected_via,
          latency_ms    = @latency_ms,
+         last_tested_at = datetime('now'),
          updated_at    = datetime('now')
        WHERE id = @id`
     ).run({ ...data, id })

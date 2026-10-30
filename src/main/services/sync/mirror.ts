@@ -10,6 +10,7 @@ import { getAuthToken, isAdmin } from '../auth-context'
 import db from '../../db/index'
 import { jobVariableRepository } from '../../db/repositories/job-variable.repository'
 import type { ConnectionRow, JobRow, JobVariable } from '@shared/index'
+import { sqliteUtcToIso } from '../../utils/format-date'
 
 const API_BASE = process.env.BRIDGE_API_URL
 let hasWarnedMissingJobConnectionsRoute = false
@@ -113,6 +114,51 @@ export async function mirrorConnectionUpdate(row: ConnectionRow): Promise<void> 
   await call('PATCH', `/connections/${rid}`, buildConnectionBody(row))
 }
 
+// ── Connection probe results ───────────────────────────────────────────────
+// Test / Test All / the background monitor can probe hundreds of connections
+// in a burst, so results are queued and sent in batches instead of one request
+// per probe. Any user (not only admins) reports the connections they test.
+
+const STATUS_FLUSH_DELAY_MS = 3000
+const STATUS_BATCH_SIZE = 500
+const pendingStatus = new Map<string, Record<string, unknown>>()
+let statusFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+export function queueConnectionStatusReport(row: ConnectionRow): void {
+  const rid = row.remote_id ?? remoteIdOf('connections', row.id)
+  const testedAt = sqliteUtcToIso(row.last_tested_at)
+  if (!rid || !testedAt) return
+  const status = row.status === 'online' || row.status === 'offline' ? row.status : 'unknown'
+  pendingStatus.set(rid, {
+    id: rid,
+    status,
+    connected_via: row.connected_via ?? null,
+    latency_ms: row.latency_ms ?? null,
+    tested_at: testedAt
+  })
+  if (!statusFlushTimer) {
+    statusFlushTimer = setTimeout(() => void flushConnectionStatusReports(), STATUS_FLUSH_DELAY_MS)
+  }
+}
+
+export async function flushConnectionStatusReports(): Promise<void> {
+  if (statusFlushTimer) {
+    clearTimeout(statusFlushTimer)
+    statusFlushTimer = null
+  }
+  while (pendingStatus.size > 0) {
+    const batch = [...pendingStatus.values()].slice(0, STATUS_BATCH_SIZE)
+    for (const item of batch) pendingStatus.delete(item.id as string)
+    try {
+      await call('POST', '/connections/status', { results: batch }, { adminOnly: false })
+    } catch (err) {
+      // Not fatal: the next Sync pushes the same fields and the server keeps the newest.
+      console.warn('[mirror] connection status report failed:', (err as Error).message)
+      return
+    }
+  }
+}
+
 export async function mirrorConnectionDelete(localId: number): Promise<void> {
   const rid = remoteIdOf('connections', localId)
   if (!rid) return
@@ -149,6 +195,7 @@ function buildJobBody(row: JobRow, mode: 'create' | 'update' = 'update'): Record
     schedule: row.schedule ?? null,
     status: row.status ?? 'idle',
     modify_dates: row.modify_dates !== false,
+    date_format: row.date_format ?? null,
     summary_extra_columns: row.summary_extra_columns ?? null,
     summary_extra_columns_scope: row.summary_extra_columns_scope ?? 'summary_only',
     excel_combine_sheets: !!row.excel_combine_sheets,
@@ -175,12 +222,13 @@ function buildLegacyJobBody(
   delete body.summary_extra_columns
   delete body.excel_combine_sheets
   delete body.skip_failed_connection_sheets
+  delete body.date_format
 
   return body
 }
 
 function isLegacyJobFieldError(message: string): boolean {
-  return /Unknown argument `(jobColor|summaryExtraColumns|excelCombineSheets|skipFailedConnectionSheets)`/i.test(
+  return /Unknown argument `(jobColor|summaryExtraColumns|excelCombineSheets|skipFailedConnectionSheets|dateFormat)`/i.test(
     message
   )
 }

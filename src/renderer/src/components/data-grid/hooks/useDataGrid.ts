@@ -15,9 +15,16 @@ import {
   type SortingState,
   type Table
 } from '@tanstack/react-table'
-import type { DataGridColumnDef, DataGridProps, FilterModel } from '../types'
+import type { DataGridColumnDef, DataGridProps, FilterModel, FilterRule } from '../types'
 import { clearColumnState, loadColumnState, saveColumnState } from '../utils/column.utils'
-import { applyFilterModel, createEmptyFilterModel } from '../utils/filter.utils'
+import {
+  applyFilterModel,
+  createEmptyFilterModel,
+  getUniqueColumnValues
+} from '../utils/filter.utils'
+
+/** A column filter as set from the header dropdown (one per column). */
+export type ColumnFilterInput = Omit<FilterRule, 'id' | 'columnId'>
 
 export interface UseDataGridReturn<TData> {
   table: Table<TData>
@@ -25,6 +32,10 @@ export interface UseDataGridReturn<TData> {
   setGlobalFilter: (v: string) => void
   filterModel: FilterModel
   setFilterModel: (m: FilterModel) => void
+  /** Replace (or clear with null) the filter of one column. */
+  setColumnFilter: (columnId: string, filter: ColumnFilterInput | null) => void
+  /** Distinct values of a column, after the OTHER columns' filters (like Excel). */
+  getColumnFilterValues: (columnId: string) => string[]
   density: 'compact' | 'standard' | 'comfortable'
   setDensity: (d: 'compact' | 'standard' | 'comfortable') => void
   resetColumnState: () => void
@@ -170,6 +181,29 @@ export function useDataGrid<TData>(props: DataGridProps<TData>): UseDataGridRetu
   const filterModel = props.filterModel ?? internalFilterModel
   const setFilterModel = props.onFilterModelChange ?? setInternalFilterModel
 
+  // Header column filters: one rule per column, all combined with AND.
+  const setColumnFilter = useCallback(
+    (columnId: string, filter: ColumnFilterInput | null) => {
+      const rest = filterModel.rules.filter((r) => r.columnId !== columnId)
+      setFilterModel({
+        logic: 'and',
+        rules: filter ? [...rest, { ...filter, id: crypto.randomUUID(), columnId }] : rest
+      })
+    },
+    [filterModel, setFilterModel]
+  )
+
+  const getColumnFilterValues = useCallback(
+    (columnId: string) => {
+      const others: FilterModel = {
+        ...filterModel,
+        rules: filterModel.rules.filter((r) => r.columnId !== columnId)
+      }
+      return getUniqueColumnValues(applyFilterModel(data, others, columns), columnId, columns)
+    },
+    [data, filterModel, columns]
+  )
+
   // ── Density ──────────────────────────────────────────────────────────────
   const [density, setDensityState] = useState<'compact' | 'standard' | 'comfortable'>(
     props.density ?? 'standard'
@@ -291,6 +325,8 @@ export function useDataGrid<TData>(props: DataGridProps<TData>): UseDataGridRetu
     setGlobalFilter,
     filterModel,
     setFilterModel,
+    setColumnFilter,
+    getColumnFilterValues,
     density,
     setDensity,
     resetColumnState

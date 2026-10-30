@@ -1,3 +1,16 @@
+/** SQLite UTC "YYYY-MM-DD HH:MM:SS" → ISO 8601 ("…Z"); null when empty or unparseable. */
+export function sqliteUtcToIso(value: string | null | undefined): string | null {
+  const m = String(value ?? '').match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/)
+  return m ? `${m[1]}T${m[2]}.000Z` : null
+}
+
+/** ISO 8601 → SQLite UTC "YYYY-MM-DD HH:MM:SS"; null when empty or unparseable. */
+export function isoToSqliteUtc(value: string | null | undefined): string | null {
+  if (!value) return null
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 19).replace('T', ' ')
+}
+
 /**
  * Format a UTC timestamp string (from SQLite / ISO) to IST (+05:30) display.
  * Matches the renderer-side formatter in src/renderer/src/lib/utils.ts.

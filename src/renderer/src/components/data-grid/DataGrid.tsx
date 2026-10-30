@@ -8,7 +8,6 @@ import { DataGridHeader } from './DataGridHeader'
 import { DataGridBody } from './DataGridBody'
 import { DataGridPagination } from './DataGridPagination'
 import { DataGridColumnPanel } from './DataGridColumnPanel'
-import { DataGridFilters } from './DataGridFilters'
 import { importFromCSV, importFromExcel } from './utils/export.utils'
 
 import type { DataGridProps } from './types'
@@ -40,12 +39,13 @@ export function DataGrid<TData>(props: DataGridProps<TData>): JSX.Element {
     setGlobalFilter,
     filterModel,
     setFilterModel,
+    setColumnFilter,
+    getColumnFilterValues,
     density,
     setDensity,
     resetColumnState
   } = useDataGrid(props)
 
-  const [filterPanelOpen, setFilterPanelOpen] = useState(false)
   const [columnPanelOpen, setColumnPanelOpen] = useState(false)
   const columnPanelRef = useRef<HTMLDivElement>(null)
   const columnPanelButtonRef = useRef<HTMLButtonElement>(null)
@@ -102,7 +102,6 @@ export function DataGrid<TData>(props: DataGridProps<TData>): JSX.Element {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent): void {
       if (e.key === 'Escape') {
-        setFilterPanelOpen(false)
         setColumnPanelOpen(false)
       }
     }
@@ -168,13 +167,13 @@ export function DataGrid<TData>(props: DataGridProps<TData>): JSX.Element {
                   onGlobalFilterChange={setGlobalFilter}
                   density={density}
                   onDensityChange={setDensity}
-                  onFilterPanelToggle={() => setFilterPanelOpen((p) => !p)}
+                  activeFilterCount={filterModel.rules.length}
+                  onClearFilters={() => setFilterModel({ logic: 'and', rules: [] })}
                   onColumnPanelToggle={() => setColumnPanelOpen((p) => !p)}
                   onImport={toolbarOptions.showImport ? handleImport : undefined}
                   onExport={props.onExport}
                   options={toolbarOptions}
                   exportFilename={persistStateKey ?? 'export'}
-                  filterPanelOpen={filterPanelOpen}
                   columnPanelOpen={columnPanelOpen}
                   selectedCount={selectedCount}
                   columnPanelButtonRef={columnPanelButtonRef}
@@ -192,15 +191,6 @@ export function DataGrid<TData>(props: DataGridProps<TData>): JSX.Element {
               </div>
             )}
           </>
-        )}
-
-        {/* ── Advanced Filters ─────────────────────────────────────────────── */}
-        {filterPanelOpen && (
-          <DataGridFilters
-            table={table}
-            filterModel={filterModel}
-            onFilterModelChange={setFilterModel}
-          />
         )}
 
         {/* ── Table area ───────────────────────────────────────────────────── */}
@@ -222,6 +212,15 @@ export function DataGrid<TData>(props: DataGridProps<TData>): JSX.Element {
               enableColumnResizing={enableColumnResizing}
               selectionMode={selectionMode}
               enableVirtualization={enableVirtualization}
+              columnFilters={
+                toolbarOptions !== false && toolbarOptions.showFilterPanel === false
+                  ? undefined
+                  : {
+                      filterModel,
+                      getValues: getColumnFilterValues,
+                      onChange: setColumnFilter
+                    }
+              }
             />
             <DataGridBody
               table={table}

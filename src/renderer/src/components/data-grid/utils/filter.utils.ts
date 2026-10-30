@@ -38,14 +38,15 @@ export const FILTER_OPERATOR_LABELS: Record<FilterOperator, string> = {
   lte: 'Less than or equal',
   between: 'Between',
   is: 'Is',
-  isNot: 'Is not'
+  isNot: 'Is not',
+  in: 'Is one of'
 }
 
 function columnIdOf<TData>(col: DataGridColumnDef<TData>): string {
   return col.id ?? ((col as { accessorKey?: string }).accessorKey ?? '')
 }
 
-function resolveFilterValue<TData>(
+export function resolveFilterValue<TData>(
   row: TData,
   columnId: string,
   columns?: DataGridColumnDef<TData>[]
@@ -70,6 +71,27 @@ function asSearchText(value: unknown): string {
   return String(value).trim().toLowerCase()
 }
 
+/** Key a cell value is matched by in the value checklist ('' = blanks). */
+export function filterValueKey(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  return String(value).trim()
+}
+
+/** Distinct value keys of one column, sorted like Excel (numbers numerically). */
+export function getUniqueColumnValues<TData>(
+  rows: TData[],
+  columnId: string,
+  columns?: DataGridColumnDef<TData>[]
+): string[] {
+  const keys = new Set<string>()
+  for (const row of rows) keys.add(filterValueKey(resolveFilterValue(row, columnId, columns)))
+  return [...keys].sort((a, b) => {
+    if (a === '') return 1
+    if (b === '') return -1
+    return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
+  })
+}
+
 export function applyFilterModel<TData>(
   rows: TData[],
   model: FilterModel,
@@ -77,8 +99,13 @@ export function applyFilterModel<TData>(
 ): TData[] {
   if (!model.rules.length) return rows
 
+  const valueSets = new Map<string, Set<string>>()
+  for (const rule of model.rules) {
+    if (rule.operator === 'in') valueSets.set(rule.id, new Set(rule.values ?? []))
+  }
+
   return rows.filter((row) => {
-    const results = model.rules.map((rule) => applyRule(row, rule, columns))
+    const results = model.rules.map((rule) => applyRule(row, rule, columns, valueSets))
     return model.logic === 'and' ? results.every(Boolean) : results.some(Boolean)
   })
 }
@@ -86,7 +113,8 @@ export function applyFilterModel<TData>(
 function applyRule<TData>(
   row: TData,
   rule: FilterRule,
-  columns?: DataGridColumnDef<TData>[]
+  columns?: DataGridColumnDef<TData>[],
+  valueSets?: Map<string, Set<string>>
 ): boolean {
   const cellValue = resolveFilterValue(row, rule.columnId, columns)
   const val = rule.value
@@ -131,6 +159,8 @@ function applyRule<TData>(
     case 'isNot':
       if (val === '' || val == null) return true
       return String(cellValue ?? '') !== String(val ?? '')
+    case 'in':
+      return (valueSets?.get(rule.id) ?? new Set(rule.values ?? [])).has(filterValueKey(cellValue))
     default:
       return true
   }

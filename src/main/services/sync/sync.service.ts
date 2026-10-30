@@ -9,6 +9,7 @@
  * Server = master. Local = cache.
  */
 import db from '../../db/index'
+import { isoToSqliteUtc, sqliteUtcToIso } from '../../utils/format-date'
 
 const API_BASE = process.env.BRIDGE_API_URL as string
 
@@ -307,7 +308,10 @@ async function pushAll(token: string) {
       username: (r.username as string) ?? '',
       password: (r.password as string) ?? '',
       trust_cert: Boolean(r.trust_cert),
-      status: (r.status as string) ?? 'unknown'
+      status: (r.status as string) ?? 'unknown',
+      connected_via: (r.connected_via as string | null) ?? null,
+      latency_ms: (r.latency_ms as number | null) ?? null,
+      last_tested_at: sqliteUtcToIso(r.last_tested_at as string | null)
     })),
     jobs: local.jobs.map((r) => {
       const connIds: number[] = (() => {
@@ -377,6 +381,7 @@ async function pushAll(token: string) {
         schedule: (r.schedule as string | null) ?? null,
         status: (r.status as 'idle' | 'running' | 'success' | 'failed') ?? 'idle',
         modify_dates: Boolean(r.modify_dates),
+        date_format: (r.date_format as string | null) ?? null,
         summary_extra_columns: (() => {
           try {
             return JSON.parse((r.summary_extra_columns as string) ?? 'null') as string[] | null
@@ -440,6 +445,10 @@ type RemoteConnection = RemoteBase & {
   password: string
   trustCert: boolean
   status: string
+  /** Missing on backends that predate probe syncing. */
+  connectedVia?: string | null
+  latencyMs?: number | null
+  lastTestedAt?: string | null
 }
 type RemoteJob = RemoteBase & {
   name: string
@@ -466,6 +475,8 @@ type RemoteJob = RemoteBase & {
   lastFailedConnectionIds: number[] | null
   lastConnectionErrors: Array<{ id: number; name: string; error: string }> | null
   modifyDates: boolean | null
+  /** Missing on backends that predate the column. */
+  dateFormat?: string | null
   summaryExtraColumns: string[] | null
   summaryExtraColumnsScope: string | null
   excelCombineSheets: boolean | null
@@ -496,6 +507,34 @@ type PullData = {
   jobVariables?: RemoteJobVariable[]
 }
 
+/** Pick the server's or this device's probe result, whichever test ran last. */
+function newestProbe(
+  remote: RemoteConnection,
+  local:
+    | {
+        status: string
+        connected_via: string | null
+        latency_ms: number | null
+        last_tested_at: string | null
+      }
+    | undefined
+): {
+  status: string
+  connected_via: string | null
+  latency_ms: number | null
+  last_tested_at: string | null
+} {
+  const server = {
+    status: remote.status,
+    connected_via: remote.connectedVia ?? null,
+    latency_ms: remote.latencyMs ?? null,
+    last_tested_at: isoToSqliteUtc(remote.lastTestedAt)
+  }
+  if (!local?.last_tested_at) return server
+  if (!server.last_tested_at || local.last_tested_at > server.last_tested_at) return local
+  return server
+}
+
 async function pullAll(token: string): Promise<SyncResult['pulled']> {
   const data = await get<PullData>('/sync/pull', token)
 
@@ -514,14 +553,51 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
     }
   })
 
+  const localDateFormatSnapshot = new Map<string, string | null>()
+  ;(
+    db.prepare('SELECT remote_id, date_format FROM jobs WHERE remote_id IS NOT NULL').all() as {
+      remote_id: string
+      date_format: string | null
+    }[]
+  ).forEach((r) => {
+    if (r.remote_id) localDateFormatSnapshot.set(r.remote_id, r.date_format)
+  })
+
   const localSkipSheetsSnapshot = new Map<string, number>()
   ;(
-    db.prepare(
-      'SELECT remote_id, skip_failed_connection_sheets FROM jobs WHERE remote_id IS NOT NULL'
-    ).all() as { remote_id: string; skip_failed_connection_sheets: number | null }[]
+    db
+      .prepare(
+        'SELECT remote_id, skip_failed_connection_sheets FROM jobs WHERE remote_id IS NOT NULL'
+      )
+      .all() as { remote_id: string; skip_failed_connection_sheets: number | null }[]
   ).forEach((r) => {
-    if (r.remote_id) localSkipSheetsSnapshot.set(r.remote_id, r.skip_failed_connection_sheets ? 1 : 0)
+    if (r.remote_id)
+      localSkipSheetsSnapshot.set(r.remote_id, r.skip_failed_connection_sheets ? 1 : 0)
   })
+
+  // Probe results are written by every device; keep whichever test is newer.
+  const localProbeSnapshot = new Map<
+    string,
+    {
+      status: string
+      connected_via: string | null
+      latency_ms: number | null
+      last_tested_at: string | null
+    }
+  >()
+  ;(
+    db
+      .prepare(
+        'SELECT remote_id, status, connected_via, latency_ms, last_tested_at FROM connections WHERE remote_id IS NOT NULL'
+      )
+      .all() as {
+      remote_id: string
+      status: string
+      connected_via: string | null
+      latency_ms: number | null
+      last_tested_at: string | null
+    }[]
+  ).forEach(({ remote_id, ...probe }) => localProbeSnapshot.set(remote_id, probe))
 
   // Server is master: wipe local state and rebuild from server snapshot.
   // Order matters — jobs → connections → catalog (no FK violations).
@@ -605,8 +681,8 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
   // ── Connections ─────────────────────────────────────────────────────────
   const findConn = db.prepare('SELECT id FROM connections WHERE remote_id = ?')
   const insertConn = db.prepare(`
-    INSERT INTO connections (name, group_id, static_ip, vpn_ip, db_name, username, password, trust_cert, fiscal_year_id, store_id, status, remote_id)
-    VALUES (@name, @group_id, @static_ip, @vpn_ip, @db_name, @username, @password, @trust_cert, @fiscal_year_id, @store_id, @status, @remote_id)
+    INSERT INTO connections (name, group_id, static_ip, vpn_ip, db_name, username, password, trust_cert, fiscal_year_id, store_id, status, connected_via, latency_ms, last_tested_at, remote_id)
+    VALUES (@name, @group_id, @static_ip, @vpn_ip, @db_name, @username, @password, @trust_cert, @fiscal_year_id, @store_id, @status, @connected_via, @latency_ms, @last_tested_at, @remote_id)
   `)
   const updateConn = db.prepare(`
     UPDATE connections SET
@@ -621,6 +697,9 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       fiscal_year_id = @fiscal_year_id,
       store_id = @store_id,
       status = @status,
+      connected_via = @connected_via,
+      latency_ms = @latency_ms,
+      last_tested_at = @last_tested_at,
       updated_at = datetime('now')
     WHERE remote_id = @remote_id
   `)
@@ -637,7 +716,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
         trust_cert: r.trustCert ? 1 : 0,
         fiscal_year_id: r.fiscalYearId ? (fyLocal.get(r.fiscalYearId) ?? null) : null,
         store_id: r.storeId ? (storeLocal.get(r.storeId) ?? null) : null,
-        status: r.status,
+        ...newestProbe(r, localProbeSnapshot.get(r.id)),
         remote_id: r.id
       }
       const existing = findConn.get(r.id) as { id: number } | undefined
@@ -657,13 +736,13 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook,
       template_path, template_mode, schedule, status, last_run_at, last_error,
       last_failed_connection_ids, last_connection_errors,
-      modify_dates, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, skip_failed_connection_sheets, remote_id
+      modify_dates, date_format, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, skip_failed_connection_sheets, remote_id
     ) VALUES (
       @name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi,
       @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook,
       @template_path, @template_mode, @schedule, @status, @last_run_at, @last_error,
       @last_failed_connection_ids, @last_connection_errors,
-      @modify_dates, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @skip_failed_connection_sheets, @remote_id
+      @modify_dates, @date_format, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @skip_failed_connection_sheets, @remote_id
     )
   `)
   const updateJob = db.prepare(`
@@ -691,6 +770,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       last_failed_connection_ids = @last_failed_connection_ids,
       last_connection_errors = @last_connection_errors,
       modify_dates = @modify_dates,
+      date_format = @date_format,
       summary_extra_columns = @summary_extra_columns,
       summary_extra_columns_scope = @summary_extra_columns_scope,
       excel_combine_sheets = @excel_combine_sheets,
@@ -742,6 +822,9 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
         ),
         last_connection_errors: JSON.stringify(r.lastConnectionErrors ?? []),
         modify_dates: r.modifyDates != null ? (r.modifyDates ? 1 : 0) : 1,
+        // Older backends don't return dateFormat — keep the local value then.
+        date_format:
+          r.dateFormat !== undefined ? r.dateFormat : (localDateFormatSnapshot.get(r.id) ?? null),
         summary_extra_columns: r.summaryExtraColumns ? JSON.stringify(r.summaryExtraColumns) : null,
         summary_extra_columns_scope:
           r.summaryExtraColumnsScope === 'summary_and_combined'

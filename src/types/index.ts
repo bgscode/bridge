@@ -153,6 +153,8 @@ export interface ConnectionRow {
   connected_via: ConnectionPath | null
   /** Round-trip connect + SELECT 1 latency in ms from last probe. */
   latency_ms: number | null
+  /** When the last probe finished, UTC "YYYY-MM-DD HH:MM:SS" (null = never tested). */
+  last_tested_at: string | null
   remote_id?: string | null
   created_at: string
   updated_at: string
@@ -160,7 +162,13 @@ export interface ConnectionRow {
 
 export type CreateConnectionDto = Omit<
   ConnectionRow,
-  'id' | 'remote_id' | 'created_at' | 'updated_at' | 'connected_via' | 'latency_ms'
+  | 'id'
+  | 'remote_id'
+  | 'created_at'
+  | 'updated_at'
+  | 'connected_via'
+  | 'latency_ms'
+  | 'last_tested_at'
 >
 export type UpdateConnectionDto = Partial<
   Omit<ConnectionRow, 'id' | 'remote_id' | 'created_at' | 'updated_at'>
@@ -197,11 +205,16 @@ export interface JobRow {
    */
   template_mode: 'new' | 'existing' | null
   /**
-   * When true (default), date/datetime values from SQL are reformatted to
-   * "dd/mm/yyyy" in the Excel output (time component stripped).
-   * When false, date values are written exactly as they come from the server.
+   * When true (default), date/datetime values from SQL are reformatted using
+   * `date_format` in the output. When false, date values are written exactly
+   * as they come from the server.
    */
   modify_dates: boolean
+  /**
+   * Excel-style pattern used when `modify_dates` is on, e.g. "dd-mmm-yyyy hh:mm".
+   * null → "dd/mm/yyyy" (time removed). See `@shared/date-format`.
+   */
+  date_format: string | null
   /**
    * Extra columns to append to the Summary sheet after the "Sheet Name" column.
    * Each value is a key like "group_name", "store_name", "fiscal_year_name",

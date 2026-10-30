@@ -1,7 +1,8 @@
 import { testConnection } from './sql-connector'
 import { connection } from '../../db/repositories/connection.repository'
+import { queueConnectionStatusReport } from '../sync/mirror'
 import type { WebContents } from 'electron'
-import type { ConnectionPath } from '@shared/index'
+import type { ConnectionPath, ConnectionRow } from '@shared/index'
 
 export type ConnectionTestProgress = {
   id: number
@@ -9,6 +10,11 @@ export type ConnectionTestProgress = {
   error: string | null
   connected_via: ConnectionPath | null
   latency_ms: number | null
+}
+
+/** Queue the stored probe result for the server so other devices see it after Sync. */
+function reportProbe(row: ConnectionRow | undefined): void {
+  if (row) queueConnectionStatusReport(row)
 }
 
 /**
@@ -35,11 +41,13 @@ export async function testConnectionById(
   try {
     const test = await testConnection(conn, timeoutSec)
     const status = test.success ? 'online' : 'offline'
-    connection.updateProbeResult(id, {
-      status,
-      connected_via: test.connectedVia,
-      latency_ms: test.latencyMs
-    })
+    reportProbe(
+      connection.updateProbeResult(id, {
+        status,
+        connected_via: test.connectedVia,
+        latency_ms: test.latencyMs
+      })
+    )
     const payload: ConnectionTestProgress = {
       id,
       status,
@@ -51,11 +59,13 @@ export async function testConnectionById(
     return status
   } catch (err) {
     const error = err instanceof Error ? err.message : 'Unknown error'
-    connection.updateProbeResult(id, {
-      status: 'offline',
-      connected_via: null,
-      latency_ms: null
-    })
+    reportProbe(
+      connection.updateProbeResult(id, {
+        status: 'offline',
+        connected_via: null,
+        latency_ms: null
+      })
+    )
     const payload: ConnectionTestProgress = {
       id,
       status: 'offline',

@@ -10,7 +10,9 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { cn } from '@/lib/utils'
 import { getPinClassName, getPinStyles } from './utils/column.utils'
-import type { DataGridDensity } from './types'
+import { DataGridColumnFilter } from './DataGridColumnFilter'
+import type { ColumnFilterInput } from './hooks/useDataGrid'
+import type { DataGridDensity, FilterModel } from './types'
 
 interface DataGridHeaderProps<TData> {
   table: Table<TData>
@@ -20,6 +22,12 @@ interface DataGridHeaderProps<TData> {
   enableColumnResizing?: boolean
   selectionMode?: 'single' | 'multiple' | 'none'
   enableVirtualization?: boolean
+  /** Excel-style filter dropdown in each column header. */
+  columnFilters?: {
+    filterModel: FilterModel
+    getValues: (columnId: string) => string[]
+    onChange: (columnId: string, filter: ColumnFilterInput | null) => void
+  }
 }
 
 const DENSITY_HEADER_CLASS: Record<DataGridDensity, string> = {
@@ -34,7 +42,8 @@ export function DataGridHeader<TData>({
   enableColumnReordering,
   enableColumnPinning,
   selectionMode,
-  enableVirtualization
+  enableVirtualization,
+  columnFilters
 }: DataGridHeaderProps<TData>): JSX.Element {
   // All drag state lives in refs — NEVER in React state during drag.
   // React re-renders during an active native drag cancel the drag in Chromium.
@@ -68,6 +77,7 @@ export function DataGridHeader<TData>({
               enableColumnPinning={enableColumnPinning}
               selectionMode={selectionMode}
               enableVirtualization={enableVirtualization}
+              columnFilters={columnFilters}
               draggingIdRef={draggingIdRef}
               dropTargetIdRef={dropTargetIdRef}
               thRefsMap={thRefsMap}
@@ -88,6 +98,7 @@ function HeaderCell({
   enableColumnPinning,
   selectionMode,
   enableVirtualization,
+  columnFilters,
   draggingIdRef,
   dropTargetIdRef,
   thRefsMap,
@@ -100,6 +111,7 @@ function HeaderCell({
   enableColumnPinning?: boolean
   selectionMode?: 'single' | 'multiple' | 'none'
   enableVirtualization?: boolean
+  columnFilters?: DataGridHeaderProps<unknown>['columnFilters']
   draggingIdRef: React.MutableRefObject<string | null>
   dropTargetIdRef: React.MutableRefObject<string | null>
   thRefsMap: React.MutableRefObject<Map<string, HTMLTableCellElement>>
@@ -112,6 +124,7 @@ function HeaderCell({
   const sorted = column.getIsSorted()
   const pinned = column.getIsPinned()
   const isDraggable = !!enableColumnReordering && !isSelect && !isActions
+  const canFilter = !!columnFilters && !isSelect && !isActions && column.getCanFilter()
 
   function handleDragStart(e: React.DragEvent<HTMLTableCellElement>): void {
     // Block drag if a column resize is in progress
@@ -257,6 +270,15 @@ function HeaderCell({
               </span>
             )}
           </button>
+        )}
+
+        {canFilter && (
+          <DataGridColumnFilter
+            column={column}
+            rule={columnFilters.filterModel.rules.find((r) => r.columnId === column.id)}
+            getValues={() => columnFilters.getValues(column.id)}
+            onApply={(filter) => columnFilters.onChange(column.id, filter)}
+          />
         )}
 
         {enableColumnPinning && !isSelect && !isActions && (

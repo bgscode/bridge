@@ -497,6 +497,37 @@ const migrations: Migration[] = [
         'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
       ).run('excel_sheet_name_source', 'store_code')
     }
+  },
+  {
+    version: 32,
+    fn(db: Database.Database): void {
+      // Some installs ran an earlier v31 that set store_name; reset to store_code.
+      db.prepare(
+        'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+      ).run('excel_sheet_name_source', 'store_code')
+    }
+  },
+  {
+    version: 33,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('date_format')) {
+        db.exec('ALTER TABLE jobs ADD COLUMN date_format TEXT')
+      }
+    }
+  },
+  {
+    version: 34,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(connections)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('last_tested_at')) {
+        db.exec('ALTER TABLE connections ADD COLUMN last_tested_at TEXT DEFAULT NULL')
+      }
+    }
   }
 ]
 

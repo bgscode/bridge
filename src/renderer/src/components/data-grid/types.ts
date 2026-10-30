@@ -34,6 +34,7 @@ export type FilterOperator =
   | 'between'
   | 'is'
   | 'isNot'
+  | 'in' // Excel-style value checklist; matches `FilterRule.values`
 
 export type FilterType = 'text' | 'number' | 'date' | 'select' | 'boolean'
 
@@ -43,6 +44,7 @@ export interface FilterRule {
   operator: FilterOperator
   value: string | number | boolean | null
   value2?: string | number | null // for 'between'
+  values?: string[] // for 'in' — value keys from filterValueKey()
 }
 
 export interface FilterModel {

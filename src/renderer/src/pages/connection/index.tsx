@@ -21,9 +21,14 @@ import { useConnections, useGroups, useStores, useFiscalYears } from '@/contexts
 import { useAuth } from '@/contexts/auth-context'
 import { downloadConnectionTemplate } from './utils/template'
 import { LatencyBadge, PathBadge, StatusBadge } from './components/status-badge'
-import { formatUtcToIst } from '@renderer/lib/utils'
+import { formatDateRelative, formatUtcToIst } from '@renderer/lib/utils'
 
 // ─── Page ──────────────────────────────────────────────────────────────────────
+
+/** Current UTC time in SQLite's "YYYY-MM-DD HH:MM:SS" form (matches last_tested_at). */
+function utcNowSqlite(): string {
+  return new Date().toISOString().slice(0, 19).replace('T', ' ')
+}
 
 export default function ConnectionPage(): JSX.Element {
   const {
@@ -59,7 +64,9 @@ export default function ConnectionPage(): JSX.Element {
       updateStatus(data.id, {
         status: data.status,
         connected_via: data.connected_via,
-        latency_ms: data.latency_ms
+        latency_ms: data.latency_ms,
+        // A finished probe (not the "testing" start event) stamps the test time.
+        ...(data.status !== 'testing' ? { last_tested_at: utcNowSqlite() } : {})
       })
     })
     return () => window.api.connections.offTestProgress()
@@ -67,8 +74,11 @@ export default function ConnectionPage(): JSX.Element {
 
   // ── Handlers ───────────────────────────────────────────────────────────────
 
+  /** Tests the selected connections, or every connection when nothing is selected. */
   async function handleTestAll(): Promise<void> {
-    const ids = connections.map((c) => c.id)
+    const selectedIds = connections.filter((c) => rowSelection[String(c.id)]).map((c) => c.id)
+    const ids = selectedIds.length > 0 ? selectedIds : connections.map((c) => c.id)
+    if (ids.length === 0) return
     ids.forEach((id) => updateStatus(id, 'testing'))
     await window.api.connections.testAll(ids)
     // Refresh rows from DB so updated_at reflects actual test completion time.
@@ -297,13 +307,9 @@ export default function ConnectionPage(): JSX.Element {
           : '',
       status: String(row.status ?? ''),
       path:
-        row.connected_via === 'static_ip'
-          ? 'Static'
-          : row.connected_via === 'vpn_ip'
-            ? 'VPN'
-            : '',
+        row.connected_via === 'static_ip' ? 'Static' : row.connected_via === 'vpn_ip' ? 'VPN' : '',
       latency_ms: row.latency_ms != null ? Number(row.latency_ms) : '',
-      last_tested: formatUtcToIst(row.updated_at)
+      last_tested: formatUtcToIst(row.last_tested_at)
     }))
   }
 
@@ -500,10 +506,22 @@ export default function ConnectionPage(): JSX.Element {
     {
       accessorKey: 'latency_ms',
       header: 'Speed',
-      cell: ({ row }) => (
-        <LatencyBadge ms={row.original.latency_ms} status={row.original.status} />
-      ),
+      cell: ({ row }) => <LatencyBadge ms={row.original.latency_ms} status={row.original.status} />,
       meta: { filterType: 'number', resizable: true }
+    },
+    {
+      accessorKey: 'last_tested_at',
+      header: 'Last Tested',
+      cell: ({ row }) => {
+        const at = row.original.last_tested_at
+        if (!at) return <span className="text-xs text-muted-foreground">Never</span>
+        return (
+          <span className="text-xs text-muted-foreground" title={formatUtcToIst(at)}>
+            {formatDateRelative(new Date(`${at.replace(' ', 'T')}Z`))}
+          </span>
+        )
+      },
+      meta: { filterType: 'date', resizable: true }
     },
     {
       accessorKey: 'created_at',
@@ -551,7 +569,13 @@ export default function ConnectionPage(): JSX.Element {
   ]
 
   // User role: status + path/speed only (no sensitive fields, no actions).
-  const USER_VISIBLE_COLS = new Set(['name', 'status', 'connected_via', 'latency_ms'])
+  const USER_VISIBLE_COLS = new Set([
+    'name',
+    'status',
+    'connected_via',
+    'latency_ms',
+    'last_tested_at'
+  ])
   const columns = isAdmin
     ? allColumns
     : allColumns.filter((c) =>
@@ -612,7 +636,7 @@ export default function ConnectionPage(): JSX.Element {
                   <>
                     <Button variant="outline" size="sm" className="gap-2" onClick={handleTestAll}>
                       <Wifi className="size-4" />
-                      Test All
+                      {selectedCount > 0 ? `Test Selected (${selectedCount})` : 'Test All'}
                     </Button>
                     {isAdmin && (
                       <Button
