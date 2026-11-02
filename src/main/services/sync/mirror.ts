@@ -199,6 +199,7 @@ function buildJobBody(row: JobRow, mode: 'create' | 'update' = 'update'): Record
     summary_extra_columns: row.summary_extra_columns ?? null,
     summary_extra_columns_scope: row.summary_extra_columns_scope ?? 'summary_only',
     excel_combine_sheets: !!row.excel_combine_sheets,
+    excel_sheet_layout: row.excel_sheet_layout,
     skip_failed_connection_sheets: !!row.skip_failed_connection_sheets
   }
   // On create, omit job_group_id when null — sending null causes the server
@@ -223,12 +224,13 @@ function buildLegacyJobBody(
   delete body.excel_combine_sheets
   delete body.skip_failed_connection_sheets
   delete body.date_format
+  delete body.excel_sheet_layout
 
   return body
 }
 
 function isLegacyJobFieldError(message: string): boolean {
-  return /Unknown argument `(jobColor|summaryExtraColumns|excelCombineSheets|skipFailedConnectionSheets|dateFormat)`/i.test(
+  return /Unknown argument `(jobColor|summaryExtraColumns|excelCombineSheets|skipFailedConnectionSheets|dateFormat|excelSheetLayout)`/i.test(
     message
   )
 }

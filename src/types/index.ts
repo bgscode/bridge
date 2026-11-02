@@ -226,7 +226,10 @@ export interface JobRow {
    * the combined "Data" sheet when excel_combine_sheets is enabled.
    */
   summary_extra_columns_scope: SummaryExtraColumnsScope
+  /** Legacy flag, kept in step with `excel_sheet_layout` for older apps/backends. */
   excel_combine_sheets: boolean
+  /** Which sheets/tabs a single-query Excel or Google Sheets job writes. */
+  excel_sheet_layout: ExcelSheetLayout
   /**
    * When true, failed connections (timeout, offline, query error) keep their
    * existing Excel / Google Sheet tab unchanged. Summary still records the
@@ -253,6 +256,25 @@ export interface JobRow {
 }
 
 export type SummaryExtraColumnsScope = 'summary_only' | 'summary_and_combined'
+
+/**
+ * - 'connections' → one sheet per connection
+ * - 'combined'    → only the combined "Data" sheet
+ * - 'both'        → "Data" sheet plus one sheet per connection (default)
+ */
+export type ExcelSheetLayout = 'connections' | 'combined' | 'both'
+
+export const DEFAULT_EXCEL_SHEET_LAYOUT: ExcelSheetLayout = 'both'
+
+export function resolveExcelSheetLayout(job: {
+  excel_sheet_layout?: string | null
+  excel_combine_sheets?: boolean | number | null
+}): ExcelSheetLayout {
+  const layout = job.excel_sheet_layout
+  if (layout === 'connections' || layout === 'combined' || layout === 'both') return layout
+  // Saved before layouts existed: "combine" wrote Data plus per-connection sheets.
+  return job.excel_combine_sheets ? 'both' : 'connections'
+}
 
 export const SUMMARY_EXTRA_COLUMN_OPTIONS = [
   { key: 'group_name', label: 'Group Name' },

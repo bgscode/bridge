@@ -1,5 +1,5 @@
 import db from '../index'
-import { CreateJobDto, JobRow, UpdateJobDto } from '@shared/index'
+import { CreateJobDto, JobRow, UpdateJobDto, resolveExcelSheetLayout } from '@shared/index'
 
 // ─── Serialization helpers ────────────────────────────────────────────────────
 // SQLite stores TEXT + INTEGER. TypeScript uses arrays + booleans.
@@ -17,6 +17,7 @@ interface RawJobRow extends Omit<
   | 'summary_extra_columns'
   | 'summary_extra_columns_scope'
   | 'excel_combine_sheets'
+  | 'excel_sheet_layout'
   | 'skip_failed_connection_sheets'
   | 'last_failed_connection_ids'
   | 'last_connection_errors'
@@ -32,6 +33,7 @@ interface RawJobRow extends Omit<
   summary_extra_columns: string | null
   summary_extra_columns_scope: string
   excel_combine_sheets: number
+  excel_sheet_layout: string | null
   skip_failed_connection_sheets: number
 }
 
@@ -74,11 +76,13 @@ function parseRow(raw: RawJobRow): JobRow {
         ? 'summary_and_combined'
         : 'summary_only',
     excel_combine_sheets: Boolean(raw.excel_combine_sheets),
+    excel_sheet_layout: resolveExcelSheetLayout(raw),
     skip_failed_connection_sheets: Boolean(raw.skip_failed_connection_sheets)
   }
 }
 
 function serializeForInsert(data: CreateJobDto): Record<string, unknown> {
+  const layout = resolveExcelSheetLayout(data)
   return {
     name: data.name,
     description: data.description ?? null,
@@ -107,7 +111,8 @@ function serializeForInsert(data: CreateJobDto): Record<string, unknown> {
       data.summary_extra_columns_scope === 'summary_and_combined'
         ? 'summary_and_combined'
         : 'summary_only',
-    excel_combine_sheets: data.excel_combine_sheets ? 1 : 0,
+    excel_combine_sheets: layout === 'connections' ? 0 : 1,
+    excel_sheet_layout: layout,
     skip_failed_connection_sheets: data.skip_failed_connection_sheets ? 1 : 0
   }
 }
@@ -141,6 +146,7 @@ const KNOWN_COLUMNS = new Set([
   'summary_extra_columns',
   'summary_extra_columns_scope',
   'excel_combine_sheets',
+  'excel_sheet_layout',
   'skip_failed_connection_sheets'
 ])
 
@@ -172,6 +178,14 @@ function serializeForUpdate(data: Record<string, unknown>): Record<string, unkno
       out[key] = value ?? null
     }
   }
+  // Keep the legacy flag in step so older apps/backends see the same choice.
+  if (out.excel_sheet_layout !== undefined) {
+    out.excel_sheet_layout = resolveExcelSheetLayout({
+      excel_sheet_layout: out.excel_sheet_layout as string | null,
+      excel_combine_sheets: Boolean(out.excel_combine_sheets)
+    })
+    out.excel_combine_sheets = out.excel_sheet_layout === 'connections' ? 0 : 1
+  }
   return out
 }
 
@@ -192,7 +206,7 @@ export const jobRepository = {
     const serialized = serializeForInsert(data)
     const result = db
       .prepare(
-        'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, skip_failed_connection_sheets, modify_dates, date_format) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @skip_failed_connection_sheets, @modify_dates, @date_format)'
+        'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, excel_sheet_layout, skip_failed_connection_sheets, modify_dates, date_format) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @excel_sheet_layout, @skip_failed_connection_sheets, @modify_dates, @date_format)'
       )
       .run(serialized)
     return this.findById(result.lastInsertRowid as number)!
@@ -200,7 +214,7 @@ export const jobRepository = {
 
   bulkCreate(data: CreateJobDto[]): JobRow[] {
     const stmt = db.prepare(
-      'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, skip_failed_connection_sheets, modify_dates, date_format) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @skip_failed_connection_sheets, @modify_dates, @date_format)'
+      'INSERT INTO jobs (name, description, job_color, job_group_id, connection_ids, online_only, is_multi, type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook, template_path, template_mode, schedule, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, excel_sheet_layout, skip_failed_connection_sheets, modify_dates, date_format) VALUES (@name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi, @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook, @template_path, @template_mode, @schedule, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @excel_sheet_layout, @skip_failed_connection_sheets, @modify_dates, @date_format)'
     )
     const insertMany = db.transaction((jobs: CreateJobDto[]) => {
       const rows: JobRow[] = []

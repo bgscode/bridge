@@ -528,6 +528,21 @@ const migrations: Migration[] = [
         db.exec('ALTER TABLE connections ADD COLUMN last_tested_at TEXT DEFAULT NULL')
       }
     }
+  },
+  {
+    version: 35,
+    fn(db: Database.Database): void {
+      const cols = (db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map(
+        (c) => c.name
+      )
+      if (!cols.includes('excel_sheet_layout')) {
+        db.exec('ALTER TABLE jobs ADD COLUMN excel_sheet_layout TEXT')
+        // Existing jobs keep what they produced: combine wrote Data + per-connection sheets.
+        db.exec(
+          "UPDATE jobs SET excel_sheet_layout = CASE WHEN excel_combine_sheets = 1 THEN 'both' ELSE 'connections' END"
+        )
+      }
+    }
   }
 ]
 

@@ -17,6 +17,11 @@ function reportProbe(row: ConnectionRow | undefined): void {
   if (row) queueConnectionStatusReport(row)
 }
 
+/** The window may close or reload mid-test; the probe result is still stored. */
+function sendProgress(webContents: WebContents, payload: ConnectionTestProgress): void {
+  if (!webContents.isDestroyed()) webContents.send('connections:test-progress', payload)
+}
+
 /**
  * Tests a single connection and returns its resulting status string.
  * Returning the status avoids a second findById call in the caller.
@@ -36,7 +41,7 @@ export async function testConnectionById(
     connected_via: conn.connected_via ?? null,
     latency_ms: conn.latency_ms ?? null
   }
-  webContents.send('connections:test-progress', testingPayload)
+  sendProgress(webContents, testingPayload)
 
   try {
     const test = await testConnection(conn, timeoutSec)
@@ -55,7 +60,7 @@ export async function testConnectionById(
       connected_via: test.connectedVia,
       latency_ms: test.latencyMs
     }
-    webContents.send('connections:test-progress', payload)
+    sendProgress(webContents, payload)
     return status
   } catch (err) {
     const error = err instanceof Error ? err.message : 'Unknown error'
@@ -73,7 +78,7 @@ export async function testConnectionById(
       connected_via: null,
       latency_ms: null
     }
-    webContents.send('connections:test-progress', payload)
+    sendProgress(webContents, payload)
     return 'offline'
   }
 }

@@ -46,6 +46,8 @@ export interface WriteToGoogleSheetsOptions {
   readChunk: (filePath: string) => Promise<Record<string, unknown>[]>
   onProgress?: (info: { bucket: string; rowsWritten: number; totalRowsForBucket: number }) => void
   combineSheets?: boolean
+  /** Per-connection tabs next to the Data tab (default true; false = Data tab only). */
+  includeConnectionTabs?: boolean
   combinedExtraColumnLabels?: string[]
   /** Header for the combined sheet's first (source label) column. */
   combinedLabelHeader?: string
@@ -168,8 +170,7 @@ export async function writeToGoogleSheets(opts: WriteToGoogleSheetsOptions): Pro
   }
 
   const bucketTargets = buildGoogleSheetBucketTargets(opts.buckets, reservedTabs)
-  // Combined output goes only to the Data tab (+ Summary) — no tab per connection.
-  const perConnectionTargets = opts.combineSheets ? [] : bucketTargets
+  const perConnectionTargets = opts.includeConnectionTabs === false ? [] : bucketTargets
 
   sheetStates = await ensureTabsExist(sheets, spreadsheetId, sheetStates, [
     ...perConnectionTargets.map((target) => target.tabName),

@@ -20,6 +20,7 @@ import { DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { RowActionsMenu } from '@/components/ui/row-actions-menu'
 import { Separator } from '@/components/ui/separator'
 import type { CreateJobDto, JobRow, UpdateJobDto, JobRunOptions } from '@shared/index'
+import { DEFAULT_EXCEL_SHEET_LAYOUT } from '@shared/index'
 import { useConnections, useJobGroups, useJobs } from '@/contexts'
 import { useAuth } from '@/contexts/auth-context'
 import { JobForm, type JobFormValues } from './components/form'
@@ -213,12 +214,17 @@ export default function JobsPage(): JSX.Element {
         !values.is_multi
           ? (values.summary_extra_columns_scope ?? 'summary_only')
           : 'summary_only',
-      excel_combine_sheets:
+      excel_sheet_layout:
         !isAction &&
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
         !values.is_multi
-          ? (values.excel_combine_sheets ?? false)
-          : false,
+          ? (values.excel_sheet_layout ?? DEFAULT_EXCEL_SHEET_LAYOUT)
+          : 'connections',
+      excel_combine_sheets:
+        !isAction &&
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
+        !values.is_multi &&
+        (values.excel_sheet_layout ?? DEFAULT_EXCEL_SHEET_LAYOUT) !== 'connections',
       skip_failed_connection_sheets:
         !isAction &&
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets')
@@ -256,6 +262,7 @@ export default function JobsPage(): JSX.Element {
       summary_extra_columns: job.summary_extra_columns,
       summary_extra_columns_scope: job.summary_extra_columns_scope ?? 'summary_only',
       excel_combine_sheets: job.excel_combine_sheets,
+      excel_sheet_layout: job.excel_sheet_layout,
       skip_failed_connection_sheets: job.skip_failed_connection_sheets
     })
   }

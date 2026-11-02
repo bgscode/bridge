@@ -10,6 +10,7 @@
  */
 import db from '../../db/index'
 import { isoToSqliteUtc, sqliteUtcToIso } from '../../utils/format-date'
+import { resolveExcelSheetLayout } from '@shared/index'
 
 const API_BASE = process.env.BRIDGE_API_URL as string
 
@@ -394,6 +395,10 @@ async function pushAll(token: string) {
             ? 'summary_and_combined'
             : 'summary_only',
         excel_combine_sheets: Boolean(r.excel_combine_sheets),
+        excel_sheet_layout: resolveExcelSheetLayout({
+          excel_sheet_layout: r.excel_sheet_layout as string | null,
+          excel_combine_sheets: r.excel_combine_sheets as number | null
+        }),
         skip_failed_connection_sheets: Boolean(r.skip_failed_connection_sheets),
         last_failed_connection_ids: lastFailedConnectionIds,
         last_connection_errors: lastConnectionErrors
@@ -480,6 +485,8 @@ type RemoteJob = RemoteBase & {
   summaryExtraColumns: string[] | null
   summaryExtraColumnsScope: string | null
   excelCombineSheets: boolean | null
+  /** Missing on backends that predate the column. */
+  excelSheetLayout?: string | null
   skipFailedConnectionSheets: boolean | null
 }
 type RemoteJobVariable = RemoteBase & {
@@ -561,6 +568,15 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
     }[]
   ).forEach((r) => {
     if (r.remote_id) localDateFormatSnapshot.set(r.remote_id, r.date_format)
+  })
+
+  const localSheetLayoutSnapshot = new Map<string, string | null>()
+  ;(
+    db
+      .prepare('SELECT remote_id, excel_sheet_layout FROM jobs WHERE remote_id IS NOT NULL')
+      .all() as { remote_id: string; excel_sheet_layout: string | null }[]
+  ).forEach((r) => {
+    if (r.remote_id) localSheetLayoutSnapshot.set(r.remote_id, r.excel_sheet_layout)
   })
 
   const localSkipSheetsSnapshot = new Map<string, number>()
@@ -736,13 +752,13 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       type, sql_query, sql_query_names, destination_type, destination_config, operation, notify_webhook,
       template_path, template_mode, schedule, status, last_run_at, last_error,
       last_failed_connection_ids, last_connection_errors,
-      modify_dates, date_format, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, skip_failed_connection_sheets, remote_id
+      modify_dates, date_format, summary_extra_columns, summary_extra_columns_scope, excel_combine_sheets, excel_sheet_layout, skip_failed_connection_sheets, remote_id
     ) VALUES (
       @name, @description, @job_color, @job_group_id, @connection_ids, @online_only, @is_multi,
       @type, @sql_query, @sql_query_names, @destination_type, @destination_config, @operation, @notify_webhook,
       @template_path, @template_mode, @schedule, @status, @last_run_at, @last_error,
       @last_failed_connection_ids, @last_connection_errors,
-      @modify_dates, @date_format, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @skip_failed_connection_sheets, @remote_id
+      @modify_dates, @date_format, @summary_extra_columns, @summary_extra_columns_scope, @excel_combine_sheets, @excel_sheet_layout, @skip_failed_connection_sheets, @remote_id
     )
   `)
   const updateJob = db.prepare(`
@@ -774,6 +790,7 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
       summary_extra_columns = @summary_extra_columns,
       summary_extra_columns_scope = @summary_extra_columns_scope,
       excel_combine_sheets = @excel_combine_sheets,
+      excel_sheet_layout = @excel_sheet_layout,
       skip_failed_connection_sheets = @skip_failed_connection_sheets,
       updated_at = datetime('now')
     WHERE remote_id = @remote_id
@@ -831,6 +848,19 @@ async function pullAll(token: string): Promise<SyncResult['pulled']> {
             ? 'summary_and_combined'
             : 'summary_only',
         excel_combine_sheets: r.excelCombineSheets ? 1 : 0,
+        // Older backends don't return excelSheetLayout — keep the local layout
+        // unless the combine flag was flipped elsewhere.
+        excel_sheet_layout: resolveExcelSheetLayout({
+          excel_sheet_layout:
+            r.excelSheetLayout !== undefined
+              ? r.excelSheetLayout
+              : (() => {
+                  const local = localSheetLayoutSnapshot.get(r.id) ?? null
+                  const localCombines = local != null && local !== 'connections'
+                  return localCombines === Boolean(r.excelCombineSheets) ? local : null
+                })(),
+          excel_combine_sheets: r.excelCombineSheets
+        }),
         skip_failed_connection_sheets:
           r.skipFailedConnectionSheets == null
             ? (localSkipSheetsSnapshot.get(r.id) ?? 0)

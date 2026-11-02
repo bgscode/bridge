@@ -3,8 +3,12 @@ import { useForm, useWatch } from 'react-hook-form'
 import { z } from 'zod'
 import { JSX, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { FileText, Plus, Trash2, RefreshCw } from 'lucide-react'
-import type { JobVariable, SummaryExtraColumnsScope } from '@shared/index'
-import { SUMMARY_EXTRA_COLUMN_OPTIONS } from '@shared/index'
+import type { ExcelSheetLayout, JobVariable, SummaryExtraColumnsScope } from '@shared/index'
+import {
+  DEFAULT_EXCEL_SHEET_LAYOUT,
+  SUMMARY_EXTRA_COLUMN_OPTIONS,
+  resolveExcelSheetLayout
+} from '@shared/index'
 import {
   DATE_FORMAT_MAX_LENGTH,
   DATE_FORMAT_PRESETS,
@@ -72,6 +76,7 @@ const schema = z
     summary_extra_columns_scope: z.enum(['summary_only', 'summary_and_combined']),
     // Combine all connections into one sheet (single-query Excel only)
     excel_combine_sheets: z.boolean(),
+    excel_sheet_layout: z.enum(['connections', 'combined', 'both']),
     skip_failed_connection_sheets: z.boolean(),
     // Action destination config
     action_file_path: z.string().optional().nullable(),
@@ -136,7 +141,8 @@ const DEFAULT_FORM_VALUES: JobFormValues = {
   template_mode: null,
   summary_extra_columns: null,
   summary_extra_columns_scope: 'summary_only',
-  excel_combine_sheets: false,
+  excel_combine_sheets: true,
+  excel_sheet_layout: DEFAULT_EXCEL_SHEET_LAYOUT,
   skip_failed_connection_sheets: false,
   action_file_path: '',
   action_file_name: '',
@@ -570,6 +576,64 @@ function SummaryExtraColumnsField({
   )
 }
 
+const SHEET_LAYOUT_OPTIONS: { value: ExcelSheetLayout; label: string; description: string }[] = [
+  {
+    value: 'both',
+    label: 'Data + connection-wise',
+    description: 'One combined "Data" sheet plus a separate sheet for each connection'
+  },
+  {
+    value: 'combined',
+    label: 'Only Data sheet',
+    description: 'All connections stacked in a single "Data" sheet'
+  },
+  {
+    value: 'connections',
+    label: 'Only connection-wise',
+    description: 'A separate sheet for each connection, no combined sheet'
+  }
+]
+
+function SheetLayoutField({
+  value,
+  onChange
+}: {
+  value: ExcelSheetLayout
+  onChange: (layout: ExcelSheetLayout) => void
+}): JSX.Element {
+  return (
+    <Field>
+      <FieldLabel>Sheets to create</FieldLabel>
+      <div className="grid gap-2 sm:grid-cols-3">
+        {SHEET_LAYOUT_OPTIONS.map((option) => {
+          const selected = value === option.value
+          return (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => onChange(option.value)}
+              className={cn(
+                'rounded-md border px-3 py-2 text-left transition-all',
+                selected
+                  ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                  : 'border-border hover:border-muted-foreground/40'
+              )}
+            >
+              <p className={cn('text-xs', selected && 'font-medium')}>
+                {option.label}
+                {option.value === DEFAULT_EXCEL_SHEET_LAYOUT && (
+                  <span className="ml-1 text-muted-foreground font-normal">(default)</span>
+                )}
+              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">{option.description}</p>
+            </button>
+          )
+        })}
+      </div>
+    </Field>
+  )
+}
+
 function SkipFailedSheetsField({
   enabled,
   onToggle
@@ -671,7 +735,12 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
   const summaryExtraColumnsScope =
     (useWatch({ control, name: 'summary_extra_columns_scope' }) as SummaryExtraColumnsScope) ??
     'summary_only'
-  const excelCombineSheets = useWatch({ control, name: 'excel_combine_sheets' }) ?? false
+  const excelSheetLayout =
+    (useWatch({ control, name: 'excel_sheet_layout' }) as ExcelSheetLayout) ??
+    DEFAULT_EXCEL_SHEET_LAYOUT
+  // Multi-query jobs always write one sheet per query/connection.
+  const excelCombineSheets = !isMulti && excelSheetLayout !== 'connections'
+  const writesConnectionSheets = isMulti || excelSheetLayout !== 'combined'
   const skipFailedConnectionSheets =
     useWatch({ control, name: 'skip_failed_connection_sheets' }) ?? false
   const operation = useWatch({ control, name: 'operation' })
@@ -907,6 +976,7 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
       summary_extra_columns: data?.summary_extra_columns ?? null,
       summary_extra_columns_scope: data?.summary_extra_columns_scope ?? 'summary_only',
       excel_combine_sheets: data?.excel_combine_sheets ?? false,
+      excel_sheet_layout: data ? resolveExcelSheetLayout(data) : DEFAULT_EXCEL_SHEET_LAYOUT,
       skip_failed_connection_sheets: data?.skip_failed_connection_sheets ?? false,
       action_file_path,
       action_file_name,
@@ -1168,16 +1238,20 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
       summary_extra_columns_scope:
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
         !values.is_multi &&
-        values.excel_combine_sheets &&
+        values.excel_sheet_layout !== 'connections' &&
         Array.isArray(values.summary_extra_columns) &&
         values.summary_extra_columns.length > 0
           ? (values.summary_extra_columns_scope ?? 'summary_only')
           : 'summary_only',
-      excel_combine_sheets:
+      excel_sheet_layout:
         (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
         !values.is_multi
-          ? (values.excel_combine_sheets ?? false)
-          : false,
+          ? (values.excel_sheet_layout ?? DEFAULT_EXCEL_SHEET_LAYOUT)
+          : 'connections',
+      excel_combine_sheets:
+        (values.destination_type === 'excel' || values.destination_type === 'google_sheets') &&
+        !values.is_multi &&
+        (values.excel_sheet_layout ?? DEFAULT_EXCEL_SHEET_LAYOUT) !== 'connections',
       skip_failed_connection_sheets:
         values.destination_type === 'excel' || values.destination_type === 'google_sheets'
           ? (values.skip_failed_connection_sheets ?? false)
@@ -2281,39 +2355,14 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                             Paste the full contents of your Google service account JSON key file
                           </p>
                         </Field>
-                        {/* Combine sheets — single-query only */}
+                        {/* Sheet layout — single-query only */}
                         {!isMulti && (
-                          <div className="flex items-center justify-between rounded-lg border border-dashed px-3 py-2">
-                            <div>
-                              <p className="text-xs font-medium">Combine into one sheet</p>
-                              <p className="text-xs text-muted-foreground">
-                                Stack all connections in a single &quot;Data&quot; sheet with
-                                section headers
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={excelCombineSheets}
-                              onClick={() =>
-                                setValue('excel_combine_sheets', !excelCombineSheets, {
-                                  shouldDirty: true
-                                })
-                              }
-                              className={cn(
-                                'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent',
-                                'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                                excelCombineSheets ? 'bg-primary' : 'bg-input'
-                              )}
-                            >
-                              <span
-                                className={cn(
-                                  'pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform',
-                                  excelCombineSheets ? 'translate-x-4' : 'translate-x-0'
-                                )}
-                              />
-                            </button>
-                          </div>
+                          <SheetLayoutField
+                            value={excelSheetLayout}
+                            onChange={(layout) =>
+                              setValue('excel_sheet_layout', layout, { shouldDirty: true })
+                            }
+                          />
                         )}
 
                         <SummaryExtraColumnsField
@@ -2329,14 +2378,18 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                           }
                         />
 
-                        <SkipFailedSheetsField
-                          enabled={skipFailedConnectionSheets}
-                          onToggle={() =>
-                            setValue('skip_failed_connection_sheets', !skipFailedConnectionSheets, {
-                              shouldDirty: true
-                            })
-                          }
-                        />
+                        {writesConnectionSheets && (
+                          <SkipFailedSheetsField
+                            enabled={skipFailedConnectionSheets}
+                            onToggle={() =>
+                              setValue(
+                                'skip_failed_connection_sheets',
+                                !skipFailedConnectionSheets,
+                                { shouldDirty: true }
+                              )
+                            }
+                          />
+                        )}
                       </>
                     )}
 
@@ -2399,49 +2452,28 @@ export function JobForm({ isOpen, onOpenChange, mode, data, onSubmit }: JobFormP
                           }
                         />
 
-                        {/* Combine sheets — single-query only */}
+                        {/* Sheet layout — single-query only */}
                         {!isMulti && (
-                          <div className="flex items-center justify-between rounded-lg border border-dashed px-3 py-2">
-                            <div>
-                              <p className="text-xs font-medium">Combine into one sheet</p>
-                              <p className="text-xs text-muted-foreground">
-                                Stack all connections in a single &quot;Data&quot; sheet with
-                                section headers
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              role="switch"
-                              aria-checked={excelCombineSheets}
-                              onClick={() =>
-                                setValue('excel_combine_sheets', !excelCombineSheets, {
-                                  shouldDirty: true
-                                })
-                              }
-                              className={cn(
-                                'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent',
-                                'transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                                excelCombineSheets ? 'bg-primary' : 'bg-input'
-                              )}
-                            >
-                              <span
-                                className={cn(
-                                  'pointer-events-none block h-4 w-4 rounded-full bg-background shadow-lg ring-0 transition-transform',
-                                  excelCombineSheets ? 'translate-x-4' : 'translate-x-0'
-                                )}
-                              />
-                            </button>
-                          </div>
+                          <SheetLayoutField
+                            value={excelSheetLayout}
+                            onChange={(layout) =>
+                              setValue('excel_sheet_layout', layout, { shouldDirty: true })
+                            }
+                          />
                         )}
 
-                        <SkipFailedSheetsField
-                          enabled={skipFailedConnectionSheets}
-                          onToggle={() =>
-                            setValue('skip_failed_connection_sheets', !skipFailedConnectionSheets, {
-                              shouldDirty: true
-                            })
-                          }
-                        />
+                        {writesConnectionSheets && (
+                          <SkipFailedSheetsField
+                            enabled={skipFailedConnectionSheets}
+                            onToggle={() =>
+                              setValue(
+                                'skip_failed_connection_sheets',
+                                !skipFailedConnectionSheets,
+                                { shouldDirty: true }
+                              )
+                            }
+                          />
+                        )}
                       </div>
                     )}
 

@@ -11,6 +11,7 @@ import type {
   JobConnectionProgress,
   JobRunOptions
 } from '@shared/index'
+import { resolveExcelSheetLayout } from '@shared/index'
 import { DEFAULT_DATE_FORMAT, formatDateValue } from '@shared/date-format'
 import { connectUsingBestIp } from '../connection/sql-connector'
 import { connection as connectionRepo } from '../../db/repositories/connection.repository'
@@ -1835,6 +1836,8 @@ async function writeOpenXmlExcelCombined(
   dateFormat: string | null = DEFAULT_DATE_FORMAT,
   options?: {
     skipFailedConnectionIds?: ReadonlySet<number>
+    /** Also write one sheet per connection next to Data (layout 'both'). */
+    includeConnectionSheets?: boolean
   }
 ): Promise<string> {
   const threshold = resolveSheetRowThreshold()
@@ -1914,8 +1917,8 @@ async function writeOpenXmlExcelCombined(
     summaryExtraColumns
   )
 
-  // Combined output is Data + Summary only. Per-connection sheets left by an
-  // earlier non-combined run are still owned, so the rewrite drops them.
+  // Per-connection sheets are always owned: rewritten for layout 'both',
+  // dropped for 'combined' (e.g. left over from an earlier run).
   const skipFailed = options?.skipFailedConnectionIds ?? new Set<number>()
   const buckets = listOutputBuckets(
     connections,
@@ -1926,6 +1929,9 @@ async function writeOpenXmlExcelCombined(
     await existingWorkbookSheetNames(filePath)
   )
   const bucketPatterns = bucketSheetNamePatterns(buckets)
+  const bucketSpecs = options?.includeConnectionSheets
+    ? buildOpenXmlBucketSheetSpecs(buckets, dateFormat, taken)
+    : []
 
   return rewriteXlsxPreservingOtherSheets({
     sourcePath: filePath,
@@ -1937,7 +1943,7 @@ async function writeOpenXmlExcelCombined(
       if (lc.startsWith('data') && /_part\d+$/.test(lc)) return true
       return isBucketSheetName(name, bucketPatterns)
     },
-    sheets: [...dataSpecs, summarySpec]
+    sheets: [...dataSpecs, ...bucketSpecs, summarySpec]
   })
 }
 
@@ -1955,7 +1961,9 @@ async function writeStreamingExcelCombinedStream(
   allChunkFiles: Map<string, string[]>,
   summaryExtraColumns: string[] = [],
   summaryExtraColumnsScope: 'summary_only' | 'summary_and_combined' = 'summary_only',
-  dateFormat: string | null = DEFAULT_DATE_FORMAT
+  dateFormat: string | null = DEFAULT_DATE_FORMAT,
+  skipFailedConnectionIds: ReadonlySet<number> = new Set(),
+  includeConnectionSheets = true
 ): Promise<string> {
   let resolvedDir = path.dirname(filePath)
   try {
@@ -2052,6 +2060,75 @@ async function writeStreamingExcelCombinedStream(
       // No rows at all — still emit an empty Data sheet with a placeholder.
       dataSheet.addRow(['No rows found']).commit()
       dataSheet.commit()
+    }
+
+    // ── Individual per-connection sheets (layout 'both') ───────────────────
+    const buckets = includeConnectionSheets
+      ? listOutputBuckets(
+          connections,
+          allChunkFiles,
+          [],
+          new Map(),
+          skipFailedConnectionIds,
+          await existingWorkbookSheetNames(filePath)
+        )
+      : []
+    for (const bucket of buckets) {
+      const baseSheetName = sanitizeSheetName(bucket.label)
+      const willSplit = bucket.rows > threshold
+      let rolloverIndex = 0
+      let sheet = workbook.addWorksheet(nextRolloverSheetName(baseSheetName, 0, taken, willSplit))
+      let headers: string[] = []
+      let hasHeader = false
+      let rowsInSheet = 0
+
+      const writeHeader = (): void => {
+        sheet.addRow(headers).commit()
+        rowsInSheet = 1
+      }
+
+      if (bucket.chunkFiles.length === 0) {
+        if (bucket.columns.length > 0) {
+          headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
+        } else if (bucket.error) {
+          headers = ['Error']
+        } else {
+          headers = ['No rows found']
+        }
+        writeHeader()
+        if (bucket.error) {
+          sheet.addRow(headers.map((h) => (h === 'Error' ? bucket.error : ''))).commit()
+        } else if (!bucket.columns.length) {
+          sheet.addRow(['No rows found']).commit()
+        }
+        sheet.commit()
+        continue
+      }
+
+      for (const chunkFile of bucket.chunkFiles) {
+        await streamChunkRows(chunkFile, (row) => {
+          if (!hasHeader) {
+            headers = Object.keys(row)
+            writeHeader()
+            hasHeader = true
+          }
+          if (rowsInSheet >= threshold) {
+            sheet.commit()
+            rolloverIndex++
+            sheet = workbook.addWorksheet(
+              nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
+            )
+            writeHeader()
+          }
+          const values = headers.map(
+            (key) =>
+              (dateFormat ? formatDateValue(row[key], dateFormat) : row[key]) as ExcelJS.CellValue
+          )
+          sheet.addRow(values).commit()
+          rowsInSheet++
+        })
+      }
+      sheet.commit()
     }
 
     // ── Summary (mirrors writeStreamingExcelReplace summary) ───────────────
@@ -2224,7 +2301,9 @@ async function writeStreamingExcelCombined(
     templatePath: string | null
     templateMode: 'new' | 'existing' | null
   },
-  skipFailedConnectionIds: ReadonlySet<number> = new Set()
+  skipFailedConnectionIds: ReadonlySet<number> = new Set(),
+  /** false → only the Data sheet (layout 'combined'); true → also per-connection sheets. */
+  includeConnectionSheets = true
 ): Promise<string> {
   const templatePath = template?.templatePath ?? null
   const templateMode = template?.templateMode ?? null
@@ -2277,7 +2356,7 @@ async function writeStreamingExcelCombined(
         summaryExtraColumns,
         summaryExtraColumnsScope,
         dateFormat,
-        { skipFailedConnectionIds }
+        { skipFailedConnectionIds, includeConnectionSheets }
       )
     } catch (err) {
       progress.error =
@@ -2302,7 +2381,9 @@ async function writeStreamingExcelCombined(
       allChunkFiles,
       summaryExtraColumns,
       summaryExtraColumnsScope,
-      dateFormat
+      dateFormat,
+      skipFailedConnectionIds,
+      includeConnectionSheets
     )
   }
 
@@ -2408,6 +2489,63 @@ async function writeStreamingExcelCombined(
         const extraValues = combinedExtraResolver?.getValues(conn.id) ?? []
         // Sheet Name is the first value in every data row
         dataSheet.addRow([sheetName, ...extraValues, ...values])
+      })
+    }
+  }
+
+  // ── Individual per-connection sheets (layout 'both') ─────────────────────
+  const threshold = resolveSheetRowThreshold()
+  const taken = new Set<string>(['data', 'summary'])
+  for (const ws of workbook.worksheets) taken.add(ws.name.toLowerCase())
+
+  for (const bucket of includeConnectionSheets ? buckets : []) {
+    const baseSheetName = sanitizeSheetName(bucket.label)
+    const willSplit = bucket.rows > threshold
+    const name = nextRolloverSheetName(baseSheetName, 0, taken, willSplit)
+    let sheet = workbook.addWorksheet(name)
+    taken.add(name.toLowerCase())
+    let rolloverIndex = 0
+    let headers: string[] = []
+    let headersSet = false
+    let rowsInSheet = 0
+
+    if (bucket.chunkFiles.length === 0) {
+      if (bucket.columns.length > 0) {
+        headers = bucket.error ? [...bucket.columns, 'Error'] : [...bucket.columns]
+        sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+      } else {
+        sheet.columns = [{ header: 'No rows found', key: 'msg', width: 30 }]
+      }
+      if (bucket.error) {
+        const cells: Record<string, unknown> = {}
+        for (const c of bucket.columns) cells[c] = ''
+        cells['Error'] = bucket.error
+        sheet.addRow(cells)
+      } else if (!bucket.columns.length) {
+        sheet.addRow({ msg: 'No rows found' })
+      }
+      continue
+    }
+
+    for (const chunkFile of bucket.chunkFiles) {
+      await streamChunkRows(chunkFile, (row) => {
+        const fmtRow = formatQueryRow(row, dateFormat)
+        if (!headersSet) {
+          headers = Object.keys(fmtRow)
+          sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+          headersSet = true
+          rowsInSheet = 1
+        }
+        if (rowsInSheet >= threshold) {
+          rolloverIndex++
+          const nextName = nextRolloverSheetName(baseSheetName, rolloverIndex, taken, willSplit)
+          sheet = workbook.addWorksheet(nextName)
+          taken.add(nextName.toLowerCase())
+          sheet.columns = headers.map((col) => ({ header: col, key: col, width: 15 }))
+          rowsInSheet = 1
+        }
+        sheet.addRow(fmtRow)
+        rowsInSheet++
       })
     }
   }
@@ -3416,10 +3554,10 @@ function estimateGoogleSheetBucketWriteRows(bucket: GsheetBucket): number {
 function estimateGoogleSheetTotalWriteRows(args: {
   buckets: GsheetBucket[]
   combineSheets: boolean
+  includeConnectionTabs: boolean
   summaryRows: Array<Array<string | number | boolean>>
 }): number {
-  // Combined mode writes no per-connection tabs.
-  const bucketRows = args.combineSheets
+  const bucketRows = !args.includeConnectionTabs
     ? 0
     : args.buckets.reduce(
         (total, bucket) => total + estimateGoogleSheetBucketWriteRows(bucket),
@@ -4567,8 +4705,9 @@ export async function runJob(
           job.skip_failed_connection_sheets === true
         )
 
+        const sheetLayout = isMultiQuery ? 'connections' : resolveExcelSheetLayout(job)
         const actualPath =
-          job.excel_combine_sheets && !isMultiQuery
+          sheetLayout !== 'connections'
             ? await writeStreamingExcelCombined(
                 destPath,
                 job.operation,
@@ -4583,7 +4722,8 @@ export async function runJob(
                   templatePath: await resolveMachineLocalTemplatePath(job.template_path, job.name),
                   templateMode: job.template_mode
                 },
-                skipFailedConnectionIds
+                skipFailedConnectionIds,
+                sheetLayout === 'both'
               )
             : await writeStreamingExcel(
                 destPath,
@@ -4697,7 +4837,8 @@ export async function runJob(
           connectionId: bucket.connection?.id ?? null,
           rowCount: bucket.rows
         }))
-        const shouldCreateCombinedSheet = job.excel_combine_sheets && !isMultiQuery
+        const gsheetLayout = isMultiQuery ? 'connections' : resolveExcelSheetLayout(job)
+        const shouldCreateCombinedSheet = gsheetLayout !== 'connections'
         const reservedGoogleSheetTabs = shouldCreateCombinedSheet
           ? ['Data', 'Summary']
           : ['Summary']
@@ -4731,6 +4872,7 @@ export async function runJob(
         const googleSheetTotalWriteRows = estimateGoogleSheetTotalWriteRows({
           buckets: googleSheetBuckets,
           combineSheets: shouldCreateCombinedSheet,
+          includeConnectionTabs: gsheetLayout !== 'combined',
           summaryRows: googleSheetSummaryRows
         })
         const googleSheetWriteProgress = new Map<
@@ -4747,6 +4889,7 @@ export async function runJob(
             return dateFormat ? rows.map((row) => formatQueryRow(row, dateFormat)) : rows
           },
           combineSheets: shouldCreateCombinedSheet,
+          includeConnectionTabs: gsheetLayout !== 'combined',
           combinedExtraColumnLabels: combinedExtraResolver?.labels,
           combinedLabelHeader: summaryConnectionHeader(),
           getCombinedExtraValues: combinedExtraResolver
